@@ -3,21 +3,30 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <title>MOVA</title>
+  <title>MATLABK — خدمة توصيل ومشاوير لأهل المنايف</title>
+  <meta name="description" content="MATLABK — خدمة توصيل ومشاوير لأهل المنايف">
+  <meta name="application-name" content="MATLABK">
+  <meta name="apple-mobile-web-app-title" content="MATLABK">
   <link rel="stylesheet" href="css/styles.css">
   <link rel="manifest" id="manifest-link">
   <meta name="theme-color" content="#FF6B00">
   <!-- Phase 4B: Leaflet اتشال بالكامل من المشروع - استبدلناه بـ MapLibre GL JS + OpenFreeMap
        Vector Tiles (راجع js/maps.js). نفس أسلوب التحميل القديم (defer) اتحافظ عليه. -->
-  <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js" defer></script>
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css">
+  <!-- AUDIT-2026 CSP (مرحلة 1). 'unsafe-inline' لسه مطلوبة في script-src بسبب ~213 onclick= داخل index.html وجافاسكريبت
+       inline؛ الخطوة التالية: استبدال onclick بـ addEventListener ثم حذفها (AUDIT_REPORT.md). frame-ancestors/report-uri
+       لا تعمل من <meta> - تُضبط كـ HTTP header في firebase.json (انظر hosting-headers.example.json). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://res.cloudinary.com https://tiles.openfreemap.org https://*.googleusercontent.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://api.cloudinary.com https://*.workers.dev https://router.project-osrm.org https://nominatim.openstreetmap.org https://overpass-api.de https://tiles.openfreemap.org; manifest-src 'self' blob:; worker-src 'self' blob:; child-src blob:; frame-src https://go-elmanayef.firebaseapp.com https://accounts.google.com">
+  <script>window.APP_CONFIG = window.APP_CONFIG || { backendDispatch: false, cloudinarySignRequiresAuth: false }; /* فعّلهم بعد نشر backend/ و workers/ */
+  window.ROUTING_CONFIG = window.ROUTING_CONFIG || {}; /* مثال إنتاج: { baseUrl: 'https://routing.yourdomain.com', provider: 'osrm-self-hosted' } */</script>
+  <script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js" defer crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css" crossorigin="anonymous">
 </head>
 <body>
 
 <!-- ===== LOADING ===== -->
 <div id="loading">
   <div class="ld-ic"><span data-icon="bike" data-size="48"></span></div>
-  <div class="ld-name">MO<span>VA</span></div>
+  <div class="ld-name">MATLAB<span>K</span></div>
   <div class="ld-bar"><div class="ld-fill"></div></div>
   <div class="ld-sub" id="ld-sub">جاري التحميل...</div>
 </div>
@@ -53,7 +62,7 @@
 <div id="screen-entry" class="screen active">
   <div class="auth-logo" style="margin-bottom:36px">
     <div class="auth-logo-ic"><span data-icon="bike" data-size="40"></span></div>
-    <h1>MO<span>VA</span></h1>
+    <h1>MATLAB<span>K</span></h1>
     <p>توصيل سريع في المنايف</p>
   </div>
   <div class="role-card">
@@ -77,7 +86,7 @@
 <div id="screen-role-select" class="screen">
   <div class="auth-logo" style="margin-bottom:36px">
     <div class="auth-logo-ic"><span data-icon="bike" data-size="40"></span></div>
-    <h1>MO<span>VA</span></h1>
+    <h1>MATLAB<span>K</span></h1>
     <p>حساب جديد — اختر نوع حسابك للمتابعة</p>
   </div>
   <div class="role-card">
@@ -100,7 +109,7 @@
 
 <!-- ===== AUTHENTICATION V2 — COMPLETE MERCHANT PROFILE (Resume Registration) ===== -->
 <div id="screen-complete-merchant" class="screen">
-  <div class="jm-hdr"><h1>بيانات متجرك</h1><p>كمّل بيانات متجرك عشان تقدر تستقبل الطلبات على MOVA</p></div>
+  <div class="jm-hdr"><h1>بيانات متجرك</h1><p>كمّل بيانات متجرك عشان تقدر تستقبل الطلبات على MATLABK</p></div>
   <div class="jm-body">
     <div class="jm-sec"><h3>بيانات المتجر</h3><div class="inp-g"><label>اسم المتجر</label><input type="text" id="cm-store-name" class="inp" placeholder="سوبرماركت المنايف"></div><div class="inp-g"><label>رقم تليفون المتجر</label><input type="tel" id="cm-store-phone" class="inp" placeholder="01xxxxxxxxx"></div></div>
     <div class="jm-sec"><h3>تصنيف المتجر</h3><div class="cat-grid"><div class="cat-g-btn cat-g-btn2" onclick="selCMCat(this)"><span class="ic" data-icon="shopping-cart" data-size="20"></span>بقالة</div><div class="cat-g-btn cat-g-btn2" onclick="selCMCat(this)"><span class="ic" data-icon="utensils" data-size="20"></span>مطعم</div><div class="cat-g-btn cat-g-btn2" onclick="selCMCat(this)"><span class="ic" data-icon="pill" data-size="20"></span>صيدلية</div></div></div>
@@ -109,65 +118,57 @@
   </div>
 </div>
 
-<!-- ===== AUTH SCREEN ===== -->
+<!-- ===== MATLABK — COMPLETE CUSTOMER PROFILE ===== -->
+<div id="screen-complete-customer" class="screen">
+  <div class="jm-hdr"><h1>أكمل بياناتك</h1><p>محتاجين بيانات بسيطة عشان نقدر نوصّل طلباتك</p></div>
+  <div class="jm-body">
+    <div class="jm-sec">
+      <div class="inp-g"><label>الاسم</label><input type="text" id="cc-name" class="inp" maxlength="100" autocomplete="name"></div>
+      <div class="inp-g"><label>رقم التليفون</label><input type="tel" id="cc-phone" class="inp" placeholder="01xxxxxxxxx" autocomplete="tel"></div>
+      <div class="inp-g"><label>العنوان (اختياري)</label><input type="text" id="cc-address" class="inp" maxlength="300"></div>
+    </div>
+    <button class="btn-ac" id="cc-submit-btn" onclick="submitCustomerProfile()">حفظ ومتابعة</button>
+    <p style="text-align:center;margin-top:14px;font-size:13px"><a href="javascript:void(0)" onclick="doLogout()" style="color:var(--mu);text-decoration:underline">تسجيل خروج</a></p>
+  </div>
+</div>
+
+<!-- ===== MATLABK — MERCHANT PENDING / REJECTED ===== -->
+<div id="screen-merchant-status" class="screen">
+  <div style="padding:40px 20px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:12px;min-height:100vh;justify-content:center">
+    <h2 id="ms-title" style="margin:0">حسابك قيد المراجعة من الإدارة</h2>
+    <p id="ms-msg" style="color:var(--mu);max-width:320px"></p>
+    <p id="ms-reason" style="display:none;color:var(--danger);max-width:320px"></p>
+    <button class="btn-p" id="ms-edit-btn" style="display:none" onclick="editMerchantProfile()">تعديل البيانات وإعادة التقديم</button>
+    <p style="margin-top:10px;font-size:13px"><a href="javascript:void(0)" onclick="doLogout()" style="color:var(--mu);text-decoration:underline">تسجيل خروج</a></p>
+  </div>
+</div>
+
+<!-- ===== AUTH SCREEN (MATLABK: Google فقط للتسجيل الجديد) ===== -->
 <div id="screen-auth" class="screen">
   <div class="auth-logo">
     <div class="auth-logo-ic" id="entry-type-icon"><span data-icon="bike" data-size="40"></span></div>
-    <h1>MO<span>VA</span></h1>
-    <p id="entry-type-label">حساب جديد</p>
+    <h1>MATLAB<span>K</span></h1>
+    <p id="entry-type-label">خدمة توصيل ومشاوير لأهل المنايف</p>
   </div>
   <div class="auth-card">
-    <div class="auth-tabs">
-      <button class="auth-tab active" onclick="switchTab('login')">تسجيل دخول</button>
-      <button class="auth-tab" onclick="switchTab('register')">حساب جديد</button>
-    </div>
     <div id="err-msg" class="err-msg"></div>
-
-    <!-- LOGIN -->
     <div id="auth-login">
       <button class="google-btn" onclick="loginGoogle()">
         <svg class="google-ic" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-        سجل دخول بـ Google
+        Continue with Google
       </button>
-      <div class="divider"><span>أو</span></div>
-      <div class="inp-g"><label>البريد الإلكتروني</label><input type="email" id="lmail" class="inp" placeholder="email@example.com"></div>
-      <div class="inp-g"><label>كلمة المرور</label><input type="password" id="lpass" class="inp" placeholder="كلمة المرور"></div>
-      <button class="btn-p" id="login-btn" onclick="doLogin()"><span class="spinner" id="lsp"></span> تسجيل دخول</button>
-      <p style="text-align:center;margin-top:10px"><button onclick="showForgot()" style="background:none;border:none;color:var(--p);font-family:'Cairo',sans-serif;font-size:12px;cursor:pointer">نسيت كلمة المرور؟</button></p>
-      <p style="text-align:center;margin-top:6px"><button onclick="showEmailOTP()" style="background:none;border:none;color:var(--p);font-family:'Cairo',sans-serif;font-size:12px;cursor:pointer">دخول بدون كلمة مرور (رابط)</button></p>
+      <p style="text-align:center;margin-top:12px;font-size:12px;color:var(--mu)">اختر حساب Google وهنكمّل باقي بياناتك بعد الدخول</p>
+      <p style="text-align:center;margin-top:14px"><button onclick="document.getElementById('legacy-login').style.display='block';this.style.display='none'" style="background:none;border:none;color:var(--p);font-family:'Cairo',sans-serif;font-size:12px;cursor:pointer">عندي حساب قديم بالبريد وكلمة المرور</button></p>
+      <div id="legacy-login" style="display:none">
+        <div class="divider"><span>دخول الحسابات القديمة</span></div>
+        <div class="inp-g"><label>البريد الإلكتروني</label><input type="email" id="lmail" class="inp" placeholder="email@example.com"></div>
+        <div class="inp-g"><label>كلمة المرور</label><input type="password" id="lpass" class="inp" placeholder="كلمة المرور"></div>
+        <button class="btn-p" id="login-btn" onclick="doLogin()"><span class="spinner" id="lsp"></span> تسجيل دخول</button>
+        <p style="text-align:center;margin-top:10px"><button onclick="showForgot()" style="background:none;border:none;color:var(--p);font-family:'Cairo',sans-serif;font-size:12px;cursor:pointer">نسيت كلمة المرور؟</button></p>
+        <p style="text-align:center;margin-top:6px"><button onclick="showEmailOTP()" style="background:none;border:none;color:var(--p);font-family:'Cairo',sans-serif;font-size:12px;cursor:pointer">دخول بدون كلمة مرور (رابط)</button></p>
+      </div>
     </div>
-
-    <!-- REGISTER -->
-    <div id="auth-register" style="display:none">
-      <!-- CUSTOMER -->
-      <div id="reg-customer-fields">
-        <!-- P14 (Customer Registration Simplification): شلنا رقم التليفون والعنوان من هنا -
-             مش ضروريين لإنشاء الحساب، وكانوا بيسببوا Friction غير ضروري. بقى ليهم مكان واضح
-             في "حسابي" بعد التسجيل (بانر "أكمل بياناتك" - راجع customer.js) بدل ما يمنعوا
-             العميل من الدخول للتطبيق من الأول. صفر تغيير في auth.js: كان أصلاً بيقرا القيم دي
-             بـ Optional Chaining ومكانتش required في الـ Validation (راجع doRegister). -->
-        <div class="inp-g"><label>الاسم الكامل</label><input type="text" id="rname" class="inp" placeholder="محمد أحمد"></div>
-        <div class="inp-g"><label>البريد الإلكتروني</label><input type="email" id="rmail" class="inp" placeholder="email@example.com"></div>
-        <div class="inp-g"><label>كلمة المرور</label><input type="password" id="rpass" class="inp" minlength="6" placeholder="6 أحرف على الأقل"></div>
-      </div>
-      <!-- MERCHANT -->
-      <div id="reg-merchant-fields" style="display:none">
-        <div class="inp-g"><label>اسم المتجر</label><input type="text" id="r-store-name" class="inp" placeholder="سوبرماركت المنايف"></div>
-        <div class="inp-g"><label>اسم صاحب المتجر</label><input type="text" id="r-owner-name" class="inp" placeholder="محمد أحمد"></div>
-        <div class="inp-g"><label>هاتف المتجر</label><input type="tel" id="r-store-phone" class="inp" placeholder="01xxxxxxxxx"></div>
-        <div class="inp-g"><label>هاتف صاحب المتجر</label><input type="tel" id="r-owner-phone" class="inp" placeholder="01xxxxxxxxx"></div>
-        <div class="inp-g"><label>عنوان المتجر</label><input type="text" id="r-store-addr" class="inp" placeholder="شارع الجمهورية"></div>
-        <div class="inp-g"><label>البريد الإلكتروني</label><input type="email" id="r-store-mail" class="inp" placeholder="email@example.com"></div>
-        <div class="inp-g"><label>كلمة المرور</label><input type="password" id="r-store-pass" class="inp" minlength="6" placeholder="6 أحرف على الأقل"></div>
-      </div>
-      <!-- DRIVER -->
-      <div id="reg-driver-fields" style="display:none">
-        <p style="font-size:12px;color:var(--mu);margin-bottom:10px">أنشئ حسابك بالبريد وكلمة المرور بس، وهنكمّل باقي بياناتك في الخطوة الجاية على طول</p>
-        <div class="inp-g"><label>البريد الإلكتروني</label><input type="email" id="r-drv-mail" class="inp" placeholder="email@example.com"></div>
-        <div class="inp-g"><label>كلمة المرور</label><input type="password" id="r-drv-pass" class="inp" minlength="6" placeholder="6 أحرف على الأقل"></div>
-      </div>
-      <button class="btn-p" id="reg-btn" onclick="doRegister()"><span class="spinner" id="rsp"></span> إنشاء الحساب</button>
-    </div>
+    <div id="auth-register" style="display:none"></div>
   </div>
 </div>
 
@@ -177,7 +178,7 @@
     <div class="otp-ic">📧</div>
     <h2>تحقق من بريدك</h2>
     <p>تم إرسال رابط تحقق على <strong id="otp-email"></strong><br>افتح البريد واضغط على الرابط</p>
-    <p style="font-size:12px;color:var(--p);margin-top:8px">💡 افتح البريد واضغط على "دخول إلى MOVA"</p>
+    <p style="font-size:12px;color:var(--p);margin-top:8px">💡 افتح البريد واضغط على "دخول إلى MATLABK"</p>
     <button class="btn-p" onclick="showScreen('screen-auth')" style="margin-top:14px">الرجوع</button>
   </div>
 </div>
@@ -764,7 +765,7 @@
 
 <!-- ===== ADMIN PANEL ===== -->
 <div id="screen-admin" class="screen">
-  <div class="adm-top"><div class="adm-logo">MO<span>VA</span></div><div style="display:flex;gap:8px"><button class="icon-btn" onclick="openNotifs()" style="color:#fff;background:rgba(255,255,255,.1)"><span data-icon="bell" data-size="20"></span><span class="badge" id="adm-notif-c">0</span></button><button class="icon-btn" onclick="admLogoutConfirm()" style="color:#fff;background:rgba(255,255,255,.1)" title="تسجيل الخروج"><span data-icon="log-out" data-size="20"></span></button></div></div>
+  <div class="adm-top"><div class="adm-logo">MATLAB<span>K</span></div><div style="display:flex;gap:8px"><button class="icon-btn" onclick="openNotifs()" style="color:#fff;background:rgba(255,255,255,.1)"><span data-icon="bell" data-size="20"></span><span class="badge" id="adm-notif-c">0</span></button><button class="icon-btn" onclick="admLogoutConfirm()" style="color:#fff;background:rgba(255,255,255,.1)" title="تسجيل الخروج"><span data-icon="log-out" data-size="20"></span></button></div></div>
   <div class="adm-nav">
     <button class="adm-nb active" onclick="admNav('dashboard',this)"><span data-icon="bar-chart-2" data-size="15"></span> لوحة</button>
     <button class="adm-nb" onclick="admNav('drivers',this)"><span data-icon="bike" data-size="15"></span> الكباتن</button>
@@ -1016,7 +1017,7 @@
 
 <!-- ===== JOIN MERCHANT SCREEN ===== -->
 <div id="screen-join-merchant" class="screen">
-  <div class="jm-hdr"><h1>انضم كتاجر</h1><p>أضف متجرك على منصة MOVA وابدأ تستقبل الطلبات</p></div>
+  <div class="jm-hdr"><h1>انضم كتاجر</h1><p>أضف متجرك على منصة MATLABK وابدأ تستقبل الطلبات</p></div>
   <div class="jm-body">
     <div class="jm-sec"><h3>بيانات المتجر</h3><div class="inp-g"><label>اسم المتجر</label><input type="text" id="jm-name" class="inp" placeholder="سوبرماركت المنايف"></div><div class="inp-g"><label>رقم التليفون</label><input type="tel" id="jm-phone" class="inp" placeholder="01xxxxxxxxx"></div><div class="inp-g"><label>العنوان</label><input type="text" id="jm-addr" class="inp" placeholder="شارع الجمهورية"></div></div>
     <div class="jm-sec"><h3>تصنيف المتجر</h3><div class="cat-grid"><div class="cat-g-btn" onclick="selMCat(this)"><span class="ic" data-icon="shopping-cart" data-size="20"></span>بقالة</div><div class="cat-g-btn" onclick="selMCat(this)"><span class="ic" data-icon="utensils" data-size="20"></span>مطعم</div><div class="cat-g-btn" onclick="selMCat(this)"><span class="ic" data-icon="pill" data-size="20"></span>صيدلية</div></div></div>
