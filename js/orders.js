@@ -176,8 +176,21 @@ export function updateDriverLocationForOrder(orderId, lat, lng) {
 // _distMeters الموجودة في driver.js)، وتستخدم نتيجتها في driver.js listenNewOrders لعرض
 // الطلب بالترتيب بدل ما كل المندوبين يشوفوه في نفس اللحظة. الـ Dispatch query ورقم الـ
 // Transaction في acceptOrderAsDriver مش هيحتاجوا أي تعديل.
-export function getDispatchQuery() {
-  return query(collection(db, 'orders'), where('status', '==', ORDER_STATUS.SEARCHING_DRIVER), where('driverId', '==', null));
+// AUDIT-2026 (P0 Driver Privacy): الوضع الصارم (الافتراضي) = المندوب يستعلم بس عن الطلبات اللي هو مرشح
+// ليها (array-contains uid) - الـ Rules ترفض أي استعلام أوسع. الوضع الانتقالي القديم (legacyOpenOrderRead
+// في settings/dispatch) بيرجّع الاستعلام المفتوح لحد ما الـ Dispatcher الخلفي (backend/functions) يتنشر.
+export async function getDispatchMode() {
+  try {
+    const s = await getDoc(doc(db, 'settings', 'dispatch'));
+    return s.exists() && s.data().legacyOpenOrderRead === true ? 'legacy_open' : 'candidates';
+  } catch (e) { return 'candidates'; }
+}
+export function getDispatchQuery(driverUid, mode = 'candidates') {
+  if (mode === 'legacy_open') {
+    return query(collection(db, 'orders'), where('status', '==', ORDER_STATUS.SEARCHING_DRIVER), where('driverId', '==', null));
+  }
+  return query(collection(db, 'orders'), where('status', '==', ORDER_STATUS.SEARCHING_DRIVER), where('driverId', '==', null),
+    where('candidateDriverIds', 'array-contains', driverUid));
 }
 
 // Stub جاهز للمستقبل - دلوقتي بيرجّع نفس القائمة من غير ترتيب (لحد ما تتوفر إحداثيات المتجر

@@ -405,16 +405,25 @@ export function loadMerchantAccount() {
 
 // --- رقم طلب تسلسلي: D1001, D1002, D1003... باستخدام عداد مركزي في Firestore ---
 export async function getNextRequestId(counterName, prefix){
+  // AUDIT-2026: الزيادة + كتابة users/{uid}.requestId في نفس الـ Transaction (الـ Rules بتتحقق بـ getAfter)
+  // ومرة واحدة لكل مستخدم - لو عنده requestId بالفعل (إعادة تقديم) بيرجع نفسه من غير ما يلمس العداد.
+  const uid = window.CU?.uid;
+  if (!uid) throw new Error('not-signed-in');
+  const userRef = doc(db,'users',uid);
   const counterRef = doc(db,'counters',counterName);
-  const seq = await runTransaction(db, async (t) => {
+  return await runTransaction(db, async (t) => {
+    const uSnap = await t.get(userRef);
+    const existing = uSnap.data()?.requestId;
+    if (existing) return existing;
     const snap = await t.get(counterRef);
     const current = snap.exists() ? snap.data().seq : 1000;
     const next = current + 1;
     if (snap.exists()) t.update(counterRef, { seq: next });
     else t.set(counterRef, { seq: next });
-    return next;
+    const requestId = prefix + next;
+    t.update(userRef, { requestId });
+    return requestId;
   });
-  return prefix + seq;
 }
 
 

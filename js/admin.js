@@ -363,7 +363,7 @@ export async function admUpdOrd(id,status){
     showToast(e?.message==='invalid-transition' ? 'انتقال غير مسموح لهذه الحالة' : 'حدث خطأ','err');
   }
 }
-export async function admAccDrv(uid){try{await updateDoc(doc(db,'users',uid),{status:'active',approvedAt:serverTimestamp()});await addDoc(collection(db,'notifications'),{userId:uid,title:'تم قبول حسابك',body:'تم اعتماد حسابك ككابتن توصيل، تقدر تبدأ تستقبل الطلبات الآن.',type:'or',read:false,createdAt:serverTimestamp()});logAudit('قبول كابتن');showToast('تم قبول المندوب','ok');closeModal('drv-modal');}catch(e){showToast('حدث خطأ','err');}}
+export async function admAccDrv(uid){try{await updateDoc(doc(db,'users',uid),{status:'active',approvedAt:serverTimestamp(),approvedBy:window.CU.uid,updatedAt:serverTimestamp()});await addDoc(collection(db,'notifications'),{userId:uid,title:'تم قبول حسابك',body:'تم اعتماد حسابك ككابتن توصيل، تقدر تبدأ تستقبل الطلبات الآن.',type:'or',read:false,createdAt:serverTimestamp()});logAudit('قبول كابتن');showToast('تم قبول المندوب','ok');closeModal('drv-modal');}catch(e){showToast('حدث خطأ','err');}}
 // P17 (A2 - Captain Lifecycle): إيقاف/تفعيل/حذف كابتن نشط بالفعل (بعد الموافقة) - كانت موجودة
 // لصفحة "المتاجر" فقط (smQuickPause/smQuickActivate/smDeleteStore)، وده نفس المبدأ بالحرف لكن
 // على users/{uid} مباشرة (المندوب مالوش مستند منفصل زي stores). الحماية الفعلية من قبول طلبات/
@@ -384,7 +384,7 @@ export async function admDrvDelete(uid){
 export function admRejDrv(uid){
   openReasonModal('سبب رفض الكابتن', ['صورة البطاقة غير واضحة','الرخصة منتهية','البيانات غير مطابقة'], async(reason)=>{
     try{
-      await updateDoc(doc(db,'users',uid),{status:'rejected',rejectReason:reason,rejectedAt:serverTimestamp()});
+      await updateDoc(doc(db,'users',uid),{status:'rejected',rejectReason:reason,rejectionReason:reason,rejectedAt:serverTimestamp(),rejectedBy:window.CU.uid,updatedAt:serverTimestamp()});
       await addDoc(collection(db,'notifications'),{userId:uid,title:'لم تتم الموافقة على حسابك',body:'للأسف لم يتم قبول طلبك ككابتن. السبب: '+reason,type:'gn',read:false,createdAt:serverTimestamp()});
       logAudit('رفض كابتن', reason);
       showToast('تم رفض الكابتن','err');
@@ -392,11 +392,11 @@ export function admRejDrv(uid){
     }catch(e){showToast('حدث خطأ','err');}
   });
 }
-export async function admAccStore(id){try{await updateDoc(doc(db,'users',id),{status:'active',approvedAt:serverTimestamp()});await updateDoc(doc(db,'stores',id),{status:'active'}).catch(()=>{});await addDoc(collection(db,'notifications'),{userId:id,title:'تم قبول متجرك',body:'تم اعتماد متجرك على منصة MOVA، تقدر تضيف منتجاتك وتستقبل الطلبات الآن.',type:'or',read:false,createdAt:serverTimestamp()});logAudit('قبول متجر');showToast('تم قبول المتجر','ok');}catch(e){showToast('حدث خطأ','err');}}
+export async function admAccStore(id){try{await updateDoc(doc(db,'users',id),{status:'active',approvedAt:serverTimestamp(),approvedBy:window.CU.uid,updatedAt:serverTimestamp()});await updateDoc(doc(db,'stores',id),{status:'active'}).catch(()=>{});await addDoc(collection(db,'notifications'),{userId:id,title:'تم قبول متجرك',body:'تم اعتماد متجرك على منصة MATLABK، تقدر تضيف منتجاتك وتستقبل الطلبات الآن.',type:'or',read:false,createdAt:serverTimestamp()});logAudit('قبول متجر');showToast('تم قبول المتجر','ok');}catch(e){showToast('حدث خطأ','err');}}
 export function admRejStore(id){
   openReasonModal('سبب رفض المتجر', ['المستندات غير واضحة','بيانات المتجر غير مكتملة','نشاط غير مسموح به'], async(reason)=>{
     try{
-      await updateDoc(doc(db,'users',id),{status:'rejected',rejectReason:reason,rejectedAt:serverTimestamp()});
+      await updateDoc(doc(db,'users',id),{status:'rejected',rejectReason:reason,rejectionReason:reason,rejectedAt:serverTimestamp(),rejectedBy:window.CU.uid,updatedAt:serverTimestamp()});
       await updateDoc(doc(db,'stores',id),{status:'rejected'}).catch(()=>{});
       await addDoc(collection(db,'notifications'),{userId:id,title:'لم تتم الموافقة على متجرك',body:'للأسف لم يتم قبول طلب انضمام متجرك. السبب: '+reason,type:'gn',read:false,createdAt:serverTimestamp()});
       logAudit('رفض متجر', reason);

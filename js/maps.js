@@ -257,9 +257,9 @@ function locPickerRenderAddress(state, geo) {
     addrEl.innerHTML = `<div class="loc-picker-addr-line">📍 تم تحديد الموقع على الخريطة</div>`;
     return;
   }
-  let html = `<div class="loc-picker-addr-line loc-picker-addr-main">📍 ${geo.address}</div>`;
-  if (geo.city) html += `<div class="loc-picker-addr-sub">المدينة: ${geo.city}</div>`;
-  if (geo.zone) html += `<div class="loc-picker-addr-sub">المنطقة: ${geo.zone}</div>`;
+  let html = `<div class="loc-picker-addr-line loc-picker-addr-main">📍 ${escText(geo.address)}</div>`;
+  if (geo.city) html += `<div class="loc-picker-addr-sub">المدينة: ${escText(geo.city)}</div>`;
+  if (geo.zone) html += `<div class="loc-picker-addr-sub">المنطقة: ${escText(geo.zone)}</div>`;
   addrEl.innerHTML = html;
 }
 

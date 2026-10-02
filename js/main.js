@@ -13,7 +13,7 @@ import { delProd, loadMerchantData, loadMerchantOrders, loadMerchantProds, merch
 import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
 import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
 import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
-import { completeRegistration, doLogin, doLogout, doRegister, firebaseAuthErrorMessage, handleGoogleAccountConflict, hideLoading, loginGoogle, pickEntryType, routeUser, selCMCat, showEmailOTP, showForgot, submitMerchantProfile, switchTab, syncToHubSpot, updateEntryLabel } from './auth.js';
+import { completeRegistration, doLogin, doLogout, doRegister, firebaseAuthErrorMessage, handleGoogleAccountConflict, hideLoading, loginGoogle, pickEntryType, routeUser, selCMCat, showEmailOTP, showForgot, submitMerchantProfile, switchTab, syncToHubSpot, updateEntryLabel , submitCustomerProfile, editMerchantProfile, takeEntryType } from './auth.js';
 import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
 import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
 import { renderIcons } from './icons.js';
@@ -66,7 +66,7 @@ Object.assign(window, {
   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
   smUploadLogo, toggleProdAvail, uploadBannerImg, doLogin, doLogout, doRegister, hideLoading,
   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
-  loginGoogle, pickEntryType, routeUser, completeRegistration, submitMerchantProfile, selCMCat, showEmailOTP, showForgot, switchTab,
+  loginGoogle, pickEntryType, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat, showEmailOTP, showForgot, switchTab,
   syncToHubSpot, updateEntryLabel, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
   acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus,
   sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer,
@@ -79,11 +79,13 @@ Object.assign(window, {
 // كان بيوقف تنفيذ باقي الملف بالكامل — بما فيه مستمع onAuthStateChanged اللي بيقفل شاشة
 // التحميل. لف الكود ده في try/catch يضمن إن فشل جزء PWA (ثانوي) مايوقفش تحميل التطبيق كله.
 try {
-  const mf={name:'MOVA',short_name:'MOVA',start_url:'/',display:'standalone',background_color:'#1A1A2E',theme_color:'#FF6B00',description:'توصيل سريع في المنايف',icons:[{src:'https://via.placeholder.com/192x192/FF6B00/FFFFFF?text=GO',sizes:'192x192',type:'image/png'},{src:'https://via.placeholder.com/512x512/FF6B00/FFFFFF?text=GO',sizes:'512x512',type:'image/png'}]};
+  const mf={name:'MATLABK',short_name:'MATLABK',start_url:'/',display:'standalone',background_color:'#1A1A2E',theme_color:'#FF6B00',description:'خدمة توصيل ومشاوير لأهل المنايف',icons:[{src:'https://via.placeholder.com/192x192/FF6B00/FFFFFF?text=GO',sizes:'192x192',type:'image/png'},{src:'https://via.placeholder.com/512x512/FF6B00/FFFFFF?text=GO',sizes:'512x512',type:'image/png'}]};
   const mb=new Blob([JSON.stringify(mf)],{type:'application/json'});
   const manifestLink = document.getElementById('manifest-link');
   if(manifestLink) manifestLink.setAttribute('href',URL.createObjectURL(mb));
-  if('serviceWorker' in navigator){const sw=`const C='mg-v1';self.addEventListener('install',e=>e.waitUntil(caches.open(C).then(c=>c.addAll(['/']))));self.addEventListener('fetch',e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request))));`;const sb=new Blob([sw],{type:'application/javascript'});navigator.serviceWorker.register(URL.createObjectURL(sb)).catch(()=>{});}
+  // AUDIT-2026: تم حذف تسجيل Service Worker المبني من Blob. المتصفحات بترفض تسجيل SW من blob: URL (يفشل بصمت
+  // عبر .catch) فكان كود ميت، ولو اشتغل كان cache-first على كل الطلبات (خطر تقديم بيانات خاصة قديمة).
+  // لو احتجنا PWA/Offline فعلاً: أضف /sw.js حقيقي بالسياسة الموجودة في AUDIT_REPORT.md (App-shell فقط، لا Firestore/Auth).
 } catch(e) { Logger.error('PWA setup failed (non-fatal):', e); }
 
 // ===== AUTH STATE LISTENER =====
@@ -121,6 +123,13 @@ initLocationPermissionGate();
 
 onAuthStateChanged(auth, async user => {
   if (user) {
+    // MATLABK: منع تسرّب حالة حساب لحساب تاني (تبديل حسابات Google): أي بيانات محلية مرتبطة بمستخدم سابق تتمسح.
+    try {
+      const last = localStorage.getItem('matlabk_last_uid');
+      if (last && last !== user.uid) { localStorage.removeItem('manayef_drv_draft'); window.uploadedDocs = {}; window.cart = []; }
+      localStorage.setItem('matlabk_last_uid', user.uid);
+    } catch(e) {}
+    window.CUD = null;
     window.CU = user;
     try {
       const ud = await getDoc(doc(db,'users',user.uid));
@@ -141,7 +150,9 @@ onAuthStateChanged(auth, async user => {
         // بيتوجه لشاشة اختيار الدور، والإنشاء الفعلي بيحصل في completeRegistration() (auth.js)
         // بس لحظة ما المستخدم يختار دوره فعليًا.
         hideLoading();
-        showScreen('screen-role-select');
+        // MATLABK: لو المستخدم اختار نوع الحساب من شاشة الدخول قبل Google، ننشئ حسابه مباشرة (الرقابة الفعلية في Rules).
+        const entryType = takeEntryType();
+        if (entryType) completeRegistration(entryType); else showScreen('screen-role-select');
       }
     } catch(e) {
       console.error('Auth routing error:', e);

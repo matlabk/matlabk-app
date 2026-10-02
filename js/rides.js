@@ -361,6 +361,8 @@ export async function createRideRequest() {
 // Client السائق اللي رفض آخر رفض (حاضر فعليًا وقتها هو كمان) - صفر حاجة محتاجة "تراقب" وقت.
 
 export async function dispatchRide(rideId) {
+  // AUDIT-2026: لما الـ Dispatcher الخلفي مفعّل (functions/index.js) بيكون هو المصدر الوحيد لاختيار المرشحين.
+  if (window.APP_CONFIG?.backendDispatch === true) return;
   const rideRef = doc(db, RIDES_COLLECTION, rideId);
   const rideSnap = await getDoc(rideRef);
   if (!rideSnap.exists()) return;
@@ -386,6 +388,8 @@ export async function dispatchRide(rideId) {
     const u = d.data();
     if (!RIDE_ELIGIBLE_VEHICLES.includes(u.vehicleType)) return;
     if (typeof u.lat !== 'number' || typeof u.lng !== 'number') return; // مفيش موقع = مينفعش نرتبه بالمسافة
+    const seen = u.lastSeen?.toMillis ? u.lastSeen.toMillis() : 0;
+    if (Date.now() - seen > 3 * 60 * 1000) return; // AUDIT-2026: موقع قديم (>3 دقايق) => مش مرشح
     const distM = _distMeters(ride.pickup.lat, ride.pickup.lng, u.lat, u.lng);
     candidates.push({ id: d.id, distM });
   });

@@ -4,7 +4,7 @@ import { average, collection, count, db, doc, getAggregateFromServer, limit, ord
 import { SL, esc, escJs, normalizeStatus, onListenersCleared, onSnapshot, orderStatusBadge, secureCloudinaryUpload, setLoad, showScreen, showToast } from './utils.js';
 import { icon } from './icons.js';
 import { getNextRequestId } from './merchant.js';
-import { ORDER_STATUS, acceptOrderAsDriver, getDispatchQuery, transitionOrder, updateDriverLocationForOrder } from './orders.js';
+import { ORDER_STATUS, acceptOrderAsDriver, getDispatchMode, getDispatchQuery, transitionOrder, updateDriverLocationForOrder } from './orders.js';
 import { updateDriverSelfLocation, initDriverRegLocationMap, destroyDriverRegLocationMap, showDriverMapTab } from './maps.js';
 import { updateDriverLocationForActiveRide, initDriverActiveRideListener, isDriverRideActive } from './rides.js';
 import { listenExternalOffers, initDriverActiveExternalListener, isDriverExternalActive } from './external.js';
@@ -290,12 +290,14 @@ async function loadDriverRating(ud) {
 }
 
 export let newOrdersUnsub = null;
-export function listenNewOrders() {
+export async function listenNewOrders() {
   if (!window.CU) return;
+  if (newOrdersUnsub) return;
+  const _dispatchMode = await getDispatchMode();
   if (newOrdersUnsub) return;
   // جديد: الطلب دلوقتي بيظهر للمندوبين بس لما يبقى searching_driver (يعني بعد ما التاجر
   // يوافق عليه فعليًا) - مش من لحظة إنشائه زي قبل كده. راجع orders.js -> getDispatchQuery().
-  const q = getDispatchQuery();
+  const q = getDispatchQuery(window.CU.uid, _dispatchMode);
   newOrdersUnsub = onSnapshot(q, snap => {
     if (!snap.empty && window.onlineStatus) {
       const ord = snap.docs[0]; const o = ord.data();

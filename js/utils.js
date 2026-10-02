@@ -140,15 +140,21 @@ export function escJs(str) {
 // بالتوقيت فبيبقى صالح لفترة قصيرة بس، فمينفعش حد يستخدمه غير من جوه التطبيق وقت الرفع.
 export const CLOUDINARY_SIGN_URL = 'https://manayef-cloudinary-sign.mohamedselim3121998.workers.dev';
 export async function secureCloudinaryUpload(file) {
-  const signRes = await fetch(CLOUDINARY_SIGN_URL);
+  // AUDIT-2026: فحص أولي على الجهاز (UX فقط - الحماية الحقيقية لازم تكون في الـ Worker/Cloudinary Preset).
+  if (!file || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) throw new Error('invalid-file-type');
+  if (file.size > 5 * 1024 * 1024) throw new Error('file-too-large');
+  const headers = {};
+  if (window.APP_CONFIG?.cloudinarySignRequiresAuth && window.CU?.getIdToken) headers.Authorization = 'Bearer ' + await window.CU.getIdToken();
+  const signRes = await fetch(CLOUDINARY_SIGN_URL, { headers });
   if (!signRes.ok) throw new Error('sign failed');
-  const { timestamp, signature, apiKey, cloudName, folder } = await signRes.json();
+  const { timestamp, signature, apiKey, cloudName, folder, allowed_formats } = await signRes.json();
   const fd = new FormData();
   fd.append('file', file);
   fd.append('api_key', apiKey);
   fd.append('timestamp', timestamp);
   fd.append('signature', signature);
   fd.append('folder', folder);
+  if (allowed_formats) fd.append('allowed_formats', allowed_formats); // لازم يتبعت لو الـ Worker وقّع عليه
   const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, { method:'POST', body:fd });
   const result = await res.json();
   if (!result.secure_url) throw new Error('upload failed');

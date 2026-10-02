@@ -2,6 +2,10 @@
 
 import { auth, createUserWithEmailAndPassword, db, doc, EmailAuthProvider, fetchSignInMethodsForEmail, getDoc, gProvider, linkWithCredential, linkWithRedirect, runTransaction, sendPasswordResetEmail, sendSignInLinkToEmail, serverTimestamp, setDoc, signInWithEmailAndPassword, signInWithRedirect, signOut, updateDoc } from './firebase.js';
 import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
+import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
+
+export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // UI hint فقط (sessionStorage) - مش مصدر صلاحيات
+export function takeEntryType() { try { const t = sessionStorage.getItem(ENTRY_TYPE_KEY); sessionStorage.removeItem(ENTRY_TYPE_KEY); return ['customer','driver','merchant'].includes(t) ? t : null; } catch(e) { return null; } }
 import { clearAllListeners, setLoad, showErr, showScreen, showToast } from './utils.js';
 import { getLocation, loadDriverData, startGPS } from './driver.js';
 import { loadAdminData } from './admin.js';
@@ -62,9 +66,8 @@ export function hideLoading() {
 }
 
 export function switchTab(t) {
-  document.querySelectorAll('.auth-tab').forEach((b,i) => b.classList.toggle('active',(t==='login'&&i===0)||(t==='register'&&i===1)));
-  document.getElementById('auth-login').style.display = t==='login'?'block':'none';
-  document.getElementById('auth-register').style.display = t==='register'?'block':'none';
+  // MATLABK: لوحة Google/الدخول دايمًا ظاهرة (التسجيل الجديد بـ Google فقط)
+  document.getElementById('auth-login').style.display = 'block';
   document.getElementById('err-msg').style.display = 'none';
   updateEntryLabel(t);
 }
@@ -73,7 +76,7 @@ export const ENTRY_LABELS = {customer:{icon:'👤',name:'عميل'},driver:{icon
 export function updateEntryLabel(tab) {
   const cfg = ENTRY_LABELS[window.selectedType] || ENTRY_LABELS.customer;
   document.getElementById('entry-type-icon').textContent = cfg.icon;
-  document.getElementById('entry-type-label').textContent = tab === 'register' ? `حساب ${cfg.name} جديد` : `دخول كـ${cfg.name}`;
+  document.getElementById('entry-type-label').textContent = `Continue with Google — ${cfg.name}`;
 }
 
 export function pickEntryType(type) {
@@ -107,6 +110,7 @@ export async function loginGoogle() {
   if (!authLockStart()) { showToast('في عملية تسجيل دخول شغالة بالفعل، استنى شوية','inf'); return; }
   try {
     showToast('جاري تسجيل الدخول بـ Google...','inf');
+    try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); } catch(e) {}
     await signInWithRedirect(auth, gProvider);
   } catch(e) {
     showToast(firebaseAuthErrorMessage(e),'err');
@@ -130,67 +134,8 @@ export async function doLogin() {
   } finally { setLoad('login-btn','lsp',false); authLockEnd(); }
 }
 
-export async function doRegister() {
-  if (!authLockStart()) { showToast('في عملية شغالة بالفعل، استنى شوية','inf'); return; }
-  const role = window.selectedType || 'customer';
-  let email='', pass='', data={};
-  if (role === 'customer') {
-    const name = document.getElementById('rname')?.value?.trim();
-    email = document.getElementById('rmail')?.value?.trim();
-    // P14 (Customer Registration Simplification): حقلي رقم التليفون والعنوان اتشالوا من شاشة
-    // التسجيل نفسها (index.html) - بيتم إكمالهم لاحقًا من "حسابي". || '' هنا ضرورية: من غير
-    // كده document.getElementById() هترجع null (العنصر مش موجود خالص دلوقتي) و phone/address
-    // هيبقوا undefined - و Firestore setDoc بيرفض أي قيمة undefined فعليًا (مفيش
-    // ignoreUndefinedProperties في تهيئة firebase.js)، يعني التسجيل كله كان هيفشل بالكامل.
-    const phone = document.getElementById('rphone')?.value?.trim() || '';
-    const address = document.getElementById('raddress')?.value?.trim() || '';
-    pass = document.getElementById('rpass')?.value;
-    if (!name||!email||!pass) { showErr('يرجى تعبئة الاسم والبريد وكلمة المرور'); authLockEnd(); return; }
-    data = { name, email, phone, address, role, points:0, status:'active', createdAt:serverTimestamp() };
-  } else if (role === 'merchant') {
-    const storeName = document.getElementById('r-store-name')?.value?.trim();
-    const ownerName = document.getElementById('r-owner-name')?.value?.trim();
-    const storePhone = document.getElementById('r-store-phone')?.value?.trim();
-    const ownerPhone = document.getElementById('r-owner-phone')?.value?.trim();
-    const storeAddr = document.getElementById('r-store-addr')?.value?.trim();
-    email = document.getElementById('r-store-mail')?.value?.trim();
-    pass = document.getElementById('r-store-pass')?.value;
-    if (!storeName||!email||!pass) { showErr('يرجى تعبئة اسم المتجر والبريد وكلمة المرور'); authLockEnd(); return; }
-    data = { name:ownerName, storeName, storePhone, ownerPhone, address:storeAddr, email, role, points:0, status:'pending', docs:window.uploadedDocs||{}, createdAt:serverTimestamp() };  } else if (role === 'driver') {
-    email = document.getElementById('r-drv-mail')?.value?.trim();
-    pass = document.getElementById('r-drv-pass')?.value;
-    if (!email||!pass) { showErr('يرجى تعبئة البريد وكلمة المرور'); authLockEnd(); return; }
-    data = { name:'', phone:'', address:'', email, role, points:0, status:'pending', docs:window.uploadedDocs||{}, createdAt:serverTimestamp() };
-  }
-  if (pass.length < 6) { showErr('كلمة المرور يجب أن تكون 6 أحرف على الأقل'); authLockEnd(); return; }
-  setLoad('reg-btn','rsp',true);
-  try {
-    const cred = await createUserWithEmailAndPassword(auth, email, pass);
-    if (role === 'merchant') {
-      // Atomic Registration: users/{uid} و stores/{uid} في نفس الـ Transaction (بدل setDoc منفصلين)
-      // - نفس الإصلاح المطبّق في completeRegistration() لمسار Google، عشان صفر احتمال يفشل
-      // إنشاء stores بعد ما users نجح (مستند تاجر ناقص).
-      await runTransaction(db, async (t) => {
-        t.set(doc(db,'users',cred.user.uid), data);
-        t.set(doc(db,'stores',cred.user.uid), {
-          storeName: data.storeName, storePhone: data.storePhone,
-          category: data.category || 'متجر', status: 'pending', createdAt: serverTimestamp()
-        });
-      });
-    } else {
-      await setDoc(doc(db,'users',cred.user.uid), data);
-    }
-    window.CUD = data;
-    syncToHubSpot(data);
-    showToast('تم إنشاء حسابك! 🎉','ok');
-    if (role === 'driver') showScreen('screen-driver-register');
-    else if (role === 'merchant') { showScreen('screen-merchant'); loadMerchantData(); }
-    else { showScreen('screen-customer'); loadCustomerData(); }
-  } catch(e) {
-    if (e.code === 'auth/email-already-in-use') { await handleEmailAlreadyInUse(email); }
-    else showErr(firebaseAuthErrorMessage(e));
-  } finally { setLoad('reg-btn','rsp',false); authLockEnd(); }
-}
+// MATLABK: التسجيل الجديد بـ Google فقط (بدون إيميل/باسورد). الدالة محفوظة لأن main.js/HTML القديم بيستوردها.
+export async function doRegister() { return loginGoogle(); }
 
 export async function doLogout() {
   if (window._gpsWatch) navigator.geolocation.clearWatch(window._gpsWatch);
@@ -204,6 +149,9 @@ export async function doLogout() {
   // خروج قبل ما يكمل مسار الربط - يمنع أي State قديم يفضل معلّق في sessionStorage لجلسة تانية
   // على نفس الجهاز/التاب.
   clearLinkIntent();
+  try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {}
+  try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
+  window.CUD = null; window.uploadedDocs = {};
   try { await signOut(auth); } catch(e) {}
   showScreen('screen-entry');
 }
@@ -322,7 +270,7 @@ export async function completeRegistration(role) {
       role,
       points: 0,
       photoURL: user.photoURL || '',
-      status: role === 'customer' ? 'active' : 'pending',
+      status: role === 'customer' ? STATUS.ACTIVE : STATUS.INCOMPLETE,
       createdAt: serverTimestamp()
     };
     if (role === 'merchant') {
@@ -358,27 +306,59 @@ export function selCMCat(btn) {
 export async function submitMerchantProfile() {
   if (!window.CU) return;
   const storeName = document.getElementById('cm-store-name')?.value?.trim();
-  const storePhone = document.getElementById('cm-store-phone')?.value?.trim();
+  const storePhone = normalizePhone(document.getElementById('cm-store-phone')?.value);
   const catBtn = document.querySelector('#screen-complete-merchant .cat-g-btn2.sel');
   const category = catBtn?.textContent?.trim() || 'متجر';
-  if (!storeName || !storePhone) { showToast('يرجى تعبئة اسم المتجر ورقم التليفون','err'); return; }
+  if (!storeName || !isValidPhoneStrict(storePhone)) { showToast('يرجى تعبئة اسم المتجر ورقم تليفون صحيح','err'); return; }
   setLoad('cm-submit-btn', null, true);
   try {
-    // Resume Registration لحسابات قديمة (قبل إصلاح Atomic Registration): ممكن stores/{uid}
-    // يكون مش موجود خالص - updateDoc كانت هترمي not-found في الحالة دي. نتأكد الأول ونستخدم
-    // الدالة المناسبة (create أو update) بما يطابق firestore.rules بالحرف في الحالتين.
-    const sd = await getDoc(doc(db,'stores',window.CU.uid));
-    if (sd.exists()) {
-      await updateDoc(doc(db,'stores',window.CU.uid), { storeName, storePhone, category, updatedAt: serverTimestamp() });
-    } else {
-      await setDoc(doc(db,'stores',window.CU.uid), { storeName, storePhone, category, status: 'pending', createdAt: serverTimestamp() });
-    }
-    showToast('تم حفظ بيانات متجرك ✅','ok');
+    // MATLABK: حفظ بيانات المتجر + تقديم الطلب للمراجعة في Transaction واحدة (الـ Rules بتتحقق من الاكتمال بـ getAfter).
+    const uid = window.CU.uid;
+    await runTransaction(db, async (t) => {
+      const sRef = doc(db,'stores',uid);
+      const sd = await t.get(sRef);
+      if (sd.exists()) t.update(sRef, { storeName, storePhone, category, updatedAt: serverTimestamp() });
+      else t.set(sRef, { storeName, storePhone, category, status: 'pending', createdAt: serverTimestamp() });
+      t.update(doc(db,'users',uid), { status: STATUS.PENDING, updatedAt: serverTimestamp() });
+    });
+    window.CUD = { ...(window.CUD || {}), status: STATUS.PENDING };
+    showToast('تم إرسال طلبك للمراجعة ✅','ok');
     routeUser();
   } catch(e) {
     showToast('حدث خطأ أثناء الحفظ، حاول مرة أخرى','err');
   } finally { setLoad('cm-submit-btn', null, false); }
 }
+
+export async function submitCustomerProfile() {
+  if (!window.CU) return;
+  const name = document.getElementById('cc-name')?.value?.trim();
+  const phone = normalizePhone(document.getElementById('cc-phone')?.value);
+  const address = document.getElementById('cc-address')?.value?.trim() || '';
+  if (!name || name.length < 2) { showToast('يرجى كتابة الاسم','err'); return; }
+  if (!isValidPhoneStrict(phone)) { showToast('يرجى كتابة رقم تليفون صحيح','err'); return; }
+  setLoad('cc-submit-btn', null, true);
+  try {
+    const patch = { name, phone, updatedAt: serverTimestamp() };
+    if (address) patch.address = address.slice(0, 300);
+    await updateDoc(doc(db,'users',window.CU.uid), patch);
+    window.CUD = { ...(window.CUD || {}), name, phone, ...(address ? { address } : {}) };
+    routeUser();
+  } catch(e) {
+    showToast('حدث خطأ أثناء الحفظ، حاول مرة أخرى','err');
+  } finally { setLoad('cc-submit-btn', null, false); }
+}
+
+// شاشة حالة التاجر: مراجعة / مرفوض (مع السبب) / إعادة تعديل وتقديم
+export function renderMerchantStatus() {
+  const u = window.CUD || {};
+  const rej = u.status === STATUS.REJECTED;
+  const t = document.getElementById('ms-title'), m = document.getElementById('ms-msg'), r = document.getElementById('ms-reason'), b = document.getElementById('ms-edit-btn');
+  if (t) t.textContent = rej ? 'تم رفض طلب التسجيل' : 'حسابك قيد المراجعة من الإدارة';
+  if (m) m.textContent = rej ? 'يمكنك تعديل بيانات متجرك وإعادة التقديم.' : 'هنبلغك فور اعتماد متجرك. لا يمكن تشغيل المتجر قبل الموافقة.';
+  if (r) { r.style.display = rej ? 'block' : 'none'; r.textContent = rej ? ('السبب: ' + (u.rejectReason || u.rejectionReason || 'غير محدد')) : ''; }
+  if (b) b.style.display = rej ? 'block' : 'none';
+}
+export function editMerchantProfile() { showScreen('screen-complete-merchant'); }
 
 
 // ===== ROUTING =====
@@ -393,19 +373,20 @@ export function routeUser() {
   loadBanners();
   loadCoupons();
   listenSettings();
-  if (role === 'admin') { showScreen('screen-admin'); loadAdminData(); }
-  else if (role === 'driver') {
-    if (window.CUD?.status === 'pending' || window.CUD?.status === 'rejected') showScreen('screen-driver-register');
-    else {
-      showScreen('screen-driver'); loadDriverData();
-      // P0 GPS Lifecycle: GPS يبدأ بس لو المندوب Online فعليًا (window.onlineStatus - مبدئيًا true
-      // دايمًا حاليًا لحد ما toggleOnline() تتغيّر، راجع firebase.js) - مش بشكل غير مشروط زي الأول.
-      if (window.onlineStatus) startGPS();
-      listenRideOffers(); initDriverActiveRideListener();
-    }
+  const target = resolveRoute(window.CUD);
+  // MATLABK: التوجيه من الحالة الفعلية (من Firestore) - بدون الوصول لأي Dashboard ثم المنع.
+  if (target === 'admin') { showScreen('screen-admin'); loadAdminData(); }
+  else if (target === 'driver-register') showScreen('screen-driver-register');
+  else if (target === 'driver-dashboard') {
+    showScreen('screen-driver'); loadDriverData();
+    if (window.onlineStatus) startGPS();
+    listenRideOffers(); initDriverActiveRideListener();
   }
-  else if (role === 'merchant') { showScreen('screen-merchant'); loadMerchantData(); }
-  else if (window.CUD?.status === 'blocked' || window.CUD?.status === 'deleted') { showScreen('screen-blocked'); }
+  else if (target === 'merchant-dashboard') { showScreen('screen-merchant'); loadMerchantData(); }
+  else if (target === 'merchant-status') { renderMerchantStatus(); showScreen('screen-merchant-status'); }
+  else if (target === 'merchant-complete') showScreen('screen-complete-merchant');
+  else if (target === 'blocked') showScreen('screen-blocked');
+  else if (target === 'customer-complete') { showScreen('screen-complete-customer'); const n = document.getElementById('cc-name'); if (n && !n.value) n.value = window.CUD?.name || window.CU?.displayName || ''; }
   else { showScreen('screen-customer'); loadCustomerData(); getLocation(); loadProducts(); loadBanners(); }
 }
 

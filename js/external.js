@@ -140,6 +140,8 @@ export async function sendExternalPurchase() {
 // Architecture Review، قسم Dispatch Exclusivity) عشان الخدمة الجديدة بس متضيفش احتمال حجز
 // ثلاثي جديد، من غير ما نلمس Ride Dispatch أو Merchant Dispatch الحاليين إطلاقًا.
 export async function dispatchExternalPurchase(purchaseId) {
+  // AUDIT-2026: لما الـ Dispatcher الخلفي مفعّل (functions/index.js) بيكون هو المصدر الوحيد لاختيار المرشحين.
+  if (window.APP_CONFIG?.backendDispatch === true) return;
   const ref = doc(db, EXTERNAL_COLLECTION, purchaseId);
   const snap = await getDoc(ref);
   if (!snap.exists()) return;
@@ -155,6 +157,8 @@ export async function dispatchExternalPurchase(purchaseId) {
     const u = d.data();
     if (!RIDE_ELIGIBLE_VEHICLES.includes(u.vehicleType)) return;
     if (typeof u.lat !== 'number' || typeof u.lng !== 'number') return;
+    const seen = u.lastSeen?.toMillis ? u.lastSeen.toMillis() : 0;
+    if (Date.now() - seen > 3 * 60 * 1000) return; // AUDIT-2026: مندوب Online بموقع قديم (>3 دقايق) مش مرشح
     const target = (ep.pickupLocation && typeof ep.pickupLocation.latitude === 'number')
       ? { lat: ep.pickupLocation.latitude, lng: ep.pickupLocation.longitude }
       : (ep.deliveryLocation || { lat: u.lat, lng: u.lng }); // مستند قديم من غير pickupLocation - fallback للحقل القديم
@@ -218,7 +222,7 @@ export async function acceptExternalOffer() {
     const banner = document.getElementById('ep-offer-banner'); if (banner) banner.style.display = 'none';
     showToast('تم قبول طلب الشراء ✅', 'ok');
     const snap2 = await getDoc(ref);
-    if (snap2.exists()) createNotification(snap2.data().customerId, 'تم تعيين كابتن', 'كابتن في طريقه لتنفيذ طلبك', 'or', purchaseId);
+    if (snap2.exists()) createNotification(snap2.data().customerId, 'تم تعيين كابتن', 'كابتن في طريقه لتنفيذ طلبك', 'or', purchaseId, 'driver_assigned', 'external_purchase');
     initDriverActiveExternalListener();
   } catch (e) {
     showToast(e.message === 'busy' ? 'أنت مشغول بمهمة أخرى حاليًا' : 'الطلب لم يعد متاحًا', 'err');
@@ -265,13 +269,13 @@ async function epTransition(purchaseId, toStatus, extra = {}) {
 export async function epStartShopping(purchaseId) {
   if (await epTransition(purchaseId, EP_STATUS.SHOPPING)) {
     const snap = await getDoc(doc(db, EXTERNAL_COLLECTION, purchaseId));
-    if (snap.exists()) createNotification(snap.data().customerId, 'بدأ الشراء', 'الكابتن بدأ تنفيذ طلبك الآن', 'or', purchaseId);
+    if (snap.exists()) createNotification(snap.data().customerId, 'بدأ الشراء', 'الكابتن بدأ تنفيذ طلبك الآن', 'or', purchaseId, 'shopping', 'external_purchase');
   }
 }
 export async function epReportItemUnavailable(purchaseId) {
   if (await epTransition(purchaseId, EP_STATUS.ITEM_UNAVAILABLE)) {
     const snap = await getDoc(doc(db, EXTERNAL_COLLECTION, purchaseId));
-    if (snap.exists()) createNotification(snap.data().customerId, 'المنتج غير متوفر', 'الكابتن لم يجد المنتج، يرجى اتخاذ قرار', 'yw', purchaseId);
+    if (snap.exists()) createNotification(snap.data().customerId, 'المنتج غير متوفر', 'الكابتن لم يجد المنتج، يرجى اتخاذ قرار', 'yw', purchaseId, 'item_unavailable', 'external_purchase');
     showToast('تم إبلاغ العميل، بانتظار قراره', 'inf');
   }
 }
@@ -280,7 +284,7 @@ export async function epReportBudgetExceeded(purchaseId, actualPrice) {
   if (!price || price <= 0) { showToast('أدخل السعر الفعلي أولًا', 'err'); return; }
   if (await epTransition(purchaseId, EP_STATUS.BUDGET_EXCEEDED, { actualProductPrice: price })) {
     const snap = await getDoc(doc(db, EXTERNAL_COLLECTION, purchaseId));
-    if (snap.exists()) createNotification(snap.data().customerId, 'السعر أعلى من المتوقع', `السعر الفعلي ${price} ج.م، يرجى الموافقة أو الإلغاء`, 'yw', purchaseId);
+    if (snap.exists()) createNotification(snap.data().customerId, 'السعر أعلى من المتوقع', `السعر الفعلي ${price} ج.م، يرجى الموافقة أو الإلغاء`, 'yw', purchaseId, 'budget_exceeded', 'external_purchase');
     showToast('تم إبلاغ العميل بالسعر، بانتظار قراره', 'inf');
   }
 }
@@ -300,13 +304,13 @@ export async function epMarkPurchased(purchaseId, actualPrice) {
   }
   if (await epTransition(purchaseId, EP_STATUS.PURCHASED, { actualProductPrice: price })) {
     const snap = await getDoc(doc(db, EXTERNAL_COLLECTION, purchaseId));
-    if (snap.exists()) createNotification(snap.data().customerId, 'تم الشراء ✅', 'الكابتن اشترى طلبك وفي طريقه إليك', 'gn', purchaseId);
+    if (snap.exists()) createNotification(snap.data().customerId, 'تم الشراء ✅', 'الكابتن اشترى طلبك وفي طريقه إليك', 'gn', purchaseId, 'purchased', 'external_purchase');
   }
 }
 export async function epStartDelivering(purchaseId) {
   if (await epTransition(purchaseId, EP_STATUS.DELIVERING)) {
     const snap = await getDoc(doc(db, EXTERNAL_COLLECTION, purchaseId));
-    if (snap.exists()) createNotification(snap.data().customerId, 'في الطريق إليك 🛵', 'الكابتن خرج للتوصيل', 'or', purchaseId);
+    if (snap.exists()) createNotification(snap.data().customerId, 'في الطريق إليك 🛵', 'الكابتن خرج للتوصيل', 'or', purchaseId, 'delivering', 'external_purchase');
   }
 }
 export async function epCompleteDelivery(purchaseId) {
@@ -317,7 +321,7 @@ export async function epCompleteDelivery(purchaseId) {
     t.update(ref, { status: EP_STATUS.COMPLETED, updatedAt: serverTimestamp() });
     t.update(doc(db, 'users', window.CU.uid), { activeExternalPurchaseId: null });
   });
-  createNotification(snap.data().customerId, 'تم التسليم ✅', 'تم تسليم طلبك بنجاح، شكرًا لاستخدامك MOVA', 'gn', purchaseId);
+  createNotification(snap.data().customerId, 'تم التسليم ✅', 'تم تسليم طلبك بنجاح، شكرًا لاستخدامك MATLABK', 'gn', purchaseId, 'completed', 'external_purchase');
   showToast('تم إنهاء الطلب بنجاح 🎉', 'ok');
 }
 
@@ -330,9 +334,9 @@ export async function epCustomerCancel(purchaseId) {
   if (ep.customerId !== window.CU?.uid || !canTransitionEP(ep.status, EP_STATUS.CANCELLED)) return;
   await runTransaction(db, async (t) => {
     t.update(ref, { status: EP_STATUS.CANCELLED, updatedAt: serverTimestamp() });
-    if (ep.driverId) t.update(doc(db, 'users', ep.driverId), { activeExternalPurchaseId: null });
+    // AUDIT-2026: ممنوع كتابة مستند مستخدم تاني (users rules) - المندوب بيفضّي علمه بنفسه في initDriverActiveExternalListener.
   });
-  if (ep.driverId) createNotification(ep.driverId, 'تم إلغاء الطلب', 'العميل ألغى طلب الشراء الخارجي', 'yw', purchaseId);
+  if (ep.driverId) createNotification(ep.driverId, 'تم إلغاء الطلب', 'العميل ألغى طلب الشراء الخارجي', 'yw', purchaseId, 'cancelled', 'external_purchase');
   showToast('تم إلغاء الطلب', 'ok');
 }
 export async function epCustomerContinue(purchaseId) {
@@ -349,7 +353,7 @@ export async function epCustomerContinue(purchaseId) {
   await updateDoc(ref, { status: target, updatedAt: serverTimestamp() });
   if (ep.driverId) createNotification(ep.driverId,
     target === EP_STATUS.PURCHASED ? 'العميل وافق على السعر' : 'العميل وافق على المتابعة',
-    target === EP_STATUS.PURCHASED ? 'يمكنك إكمال التوصيل الآن' : 'يمكنك إكمال عملية الشراء', 'gn', purchaseId);
+    target === EP_STATUS.PURCHASED ? 'يمكنك إكمال التوصيل الآن' : 'يمكنك إكمال عملية الشراء', 'gn', purchaseId, target, 'external_purchase');
   showToast(target === EP_STATUS.PURCHASED ? 'تم تأكيد السعر، الكابتن في طريقه إليك' : 'تم إبلاغ الكابتن بالمتابعة', 'ok');
 }
 
@@ -437,7 +441,12 @@ export function initDriverActiveExternalListener() {
     // (زي stopDriverActiveRide في rides.js بالظبط) بدل ما يفضل شغال بلا داعي.
     const wasActive = !!_activeEpId;
     _activeEpId = active ? active.id : null;
-    if (wasActive && !_activeEpId) maybeStopGpsIfIdle();
+    if (wasActive && !_activeEpId) {
+      maybeStopGpsIfIdle();
+      // Self-heal: الطلب انتهى/اتلغى - المندوب يفضّي علمه الشخصي (مسموح بالـ Rules: null دايمًا).
+      updateDoc(doc(db, 'users', uid), { activeExternalPurchaseId: null }).catch(() => {});
+      if (window.CUD) window.CUD.activeExternalPurchaseId = null;
+    }
     const panel = document.getElementById('ep-active-panel');
     if (!panel) return;
     if (!active) { panel.style.display = 'none'; return; }

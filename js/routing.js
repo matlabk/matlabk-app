@@ -6,13 +6,22 @@
 // (getRoute) والـ Response Shape ثابتين.
 
 // ===== إعدادات المزود (نقطة التغيير الوحيدة وقت الانتقال لاحقًا لـ Self-Hosted OSRM) =====
-const OSRM_BASE_URL = 'https://router.project-osrm.org';
+// AUDIT-2026 (Routing provider abstraction): أي Provider بيدعم واجهة OSRM (/route/v1/{profile}/{lng,lat;lng,lat})
+// ينفع هنا من غير تعديل كود: OSRM مستضاف ذاتيًا، أو Backend proxy بيوفّر نفس الشكل (GraphHopper/Mapbox/Google
+// Routes يتغلّفوا في backend/ ويرجعوا شكل OSRM). الضبط من window.ROUTING_CONFIG (index.html):
+//   { baseUrl: 'https://routing.example.com', provider: 'osrm-self-hosted' }
+// الافتراضي = OSRM Public Demo (Development فقط). بيطلع تحذير في الـ Console لو اتشغّل على دومين غير localhost.
+const _RC = (typeof window !== 'undefined' && window.ROUTING_CONFIG) || {};
+const OSRM_BASE_URL = _RC.baseUrl || 'https://router.project-osrm.org';
 // ملحوظة: OSRM Public Demo مفيهوش profile مخصص لموتوسيكل/توك توك — 'driving' هو الأقرب
 // المتاح فعليًا لكل أنواع المركبات المؤهلة للمشاوير حاليًا (RIDE_ELIGIBLE_VEHICLES). القرار
 // موثّق هنا صراحة لحد ما ننتقل لـ Self-Hosted OSRM ببروفايلات مخصصة لكل نوع مركبة.
 const OSRM_PROFILE = 'driving';
 const ROUTING_TIMEOUT_MS = 8000;
-const PROVIDER_NAME = 'osrm-public-demo';
+const PROVIDER_NAME = _RC.provider || 'osrm-public-demo';
+if (!_RC.baseUrl && typeof location !== 'undefined' && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
+  console.warn('[routing] OSRM Public Demo غير مناسب للإنتاج ولا يجوز اعتماده كمصدر مسافة/سعر - اضبط window.ROUTING_CONFIG.');
+}
 
 // ===== SESSION CACHE (المهمة 8 - Memory فقط، بيتصفر عند إعادة تحميل الصفحة عمدًا) =====
 // صفر Firestore، صفر localStorage، صفر أي تخزين دائم — Map عادية في الذاكرة بس، عشان لو

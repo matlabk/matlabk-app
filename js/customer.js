@@ -1,6 +1,6 @@
 // ===== customer.js — شاشات العميل: تصفح المتاجر/المنتجات، السلة، الطلبات، التقييم، طلبات عامة =====
 
-import { addDoc, collection, db, doc, getCountFromServer, limit, orderBy, query, serverTimestamp, updateDoc, where } from './firebase.js';
+import { addDoc, collection, db, doc, getCountFromServer, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from './firebase.js';
 import { SL, NEW_STEPS, NEW_STEP_ICONS, NEW_STEP_LABELS, callStore, closeModal, debounce, esc, escJs, filterProds, isValidPhone, normalizeStatus, onListenersCleared, onSnapshot, openWA, orderStatusBadge, showScreen, showToast } from './utils.js';
 import { ORDER_STATUS, custCancelOrder, openTrack } from './orders.js';
 import { icon } from './icons.js';
@@ -144,7 +144,7 @@ export function loadStores() {
       const cat = catMap[m.category] || 'super';
       const sName = m.storeName || m.name || 'متجر';
       const sPhone = m.storePhone || m.phone || '';
-      html += `<div class="store-card" data-cat="${cat}">
+      html += `<div class="store-card" data-cat="${esc(cat)}">
         <div class="store-img" style="background:linear-gradient(135deg,#1A1A2E,#0F3460)">${icon('store',44)}<div class="s-open s-on">مفتوح</div></div>
         <div class="store-body">
           <h3>${esc(sName)}</h3>
@@ -190,7 +190,7 @@ export function renderProds(cat) {
   prods.forEach(p => { if(!grouped[p.cat]) grouped[p.cat]=[]; grouped[p.cat].push(p); });
   let html = '';
   Object.keys(grouped).forEach(c => {
-    html += `<div class="prod-sec-t pst" data-sec="${c}">${CATS[c]||c}</div><div class="prods-grid pst" data-sec="${c}">`;
+    html += `<div class="prod-sec-t pst" data-sec="${esc(c)}">${esc(CATS[c]||c)}</div><div class="prods-grid pst" data-sec="${esc(c)}">`;
     grouped[c].forEach(p => {
       const inCart = window.cart.find(x=>x.id===p.id);
       const qty = inCart?.qty||0;
@@ -455,15 +455,17 @@ export async function submitRating() {
   if (!window.CU || !window._currentTrackOrd) return;
   const o = window._currentTrackOrd;
   try {
-    await addDoc(collection(db,'ratings'), {
+    // AUDIT-2026: معرّف ثابت orderId_customerId_targetType (الـ Rules بتفرضه) => تقييم واحد لكل علاقة.
+    const ratingId = `${o.id}_${window.CU.uid}_${window.ratingTarget}`;
+    await setDoc(doc(db,'ratings', ratingId), {
       orderId: o.id, targetId: window.ratingTarget==='store'?o.storeId:o.driverId,
-      targetType: window.ratingTarget, stars: window.ratingStars,
-      comment: document.getElementById('rating-comment').value||'',
+      targetType: window.ratingTarget, stars: Number(window.ratingStars),
+      comment: String(document.getElementById('rating-comment').value||'').slice(0, 500),
       customerId: window.CU.uid, createdAt: serverTimestamp()
     });
     showToast('شكراً لتقييمك!','ok');
     document.getElementById('rating-section').style.display='none';
-  } catch(e) { showToast('حدث خطأ','err'); }
+  } catch(e) { showToast(e?.code === 'permission-denied' ? 'تم تقييم هذا الطلب من قبل' : 'حدث خطأ','err'); }
 }
 
 

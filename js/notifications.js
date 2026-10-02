@@ -15,9 +15,18 @@ import { esc, Logger, onListenersCleared, onSnapshot } from './utils.js';
 // تكتب على نفس المستند اللي أصلاً موجود، وFirestore Rules بترفض هذا كـ"تعديل" غير مسموح
 // (راجع match /notifications/{id} في firestore.rules) فمفيش تكرار فعلي بيتسجل. الأحداث اللي
 // معندهاش orderId (زي قرارات تسجيل مندوب من admin.js) بتفضل تستخدم addDoc العادي زي الأول.
-export async function createNotification(userId, title, body, type = 'gn', orderId = null, eventKey = null) {
+// AUDIT-2026: الباراميتر الخامس بقى entityId (orderId لو entityType=='order'). entityType السابع:
+// 'order' (افتراضي، نفس السلوك القديم بالحرف) | 'ride' | 'external_purchase' - الأخيرين بيكتبوا
+// Schema الجديد (entityType/entityId/eventKey) ولازم eventKey = الحالة الحالية للكيان (راجع firestore.rules).
+export async function createNotification(userId, title, body, type = 'gn', orderId = null, eventKey = null, entityType = 'order') {
   if (!userId) return;
   try {
+    if (entityType !== 'order') {
+      if (!orderId || !eventKey) return;
+      await setDoc(doc(db, 'notifications', `${entityType}_${orderId}_${eventKey}_${userId}`),
+        { userId, title, body, type, entityType, entityId: orderId, eventKey, read: false, createdAt: serverTimestamp() });
+      return;
+    }
     const payload = { userId, title, body, type, orderId: orderId || null, read: false, createdAt: serverTimestamp() };
     if (orderId && eventKey) {
       // eventKey بيتحط كـ field صريح (مش بس جوه الـ ID) عشان firestore.rules تقدر تتحقق فعليًا
