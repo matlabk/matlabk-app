@@ -176,19 +176,9 @@ export function updateDriverLocationForOrder(orderId, lat, lng) {
 // _distMeters الموجودة في driver.js)، وتستخدم نتيجتها في driver.js listenNewOrders لعرض
 // الطلب بالترتيب بدل ما كل المندوبين يشوفوه في نفس اللحظة. الـ Dispatch query ورقم الـ
 // Transaction في acceptOrderAsDriver مش هيحتاجوا أي تعديل.
-// AUDIT-2026 (P0 Driver Privacy): الوضع الصارم (الافتراضي) = المندوب يستعلم بس عن الطلبات اللي هو مرشح
-// ليها (array-contains uid) - الـ Rules ترفض أي استعلام أوسع. الوضع الانتقالي القديم (legacyOpenOrderRead
-// في settings/dispatch) بيرجّع الاستعلام المفتوح لحد ما الـ Dispatcher الخلفي (backend/functions) يتنشر.
-export async function getDispatchMode() {
-  try {
-    const s = await getDoc(doc(db, 'settings', 'dispatch'));
-    return s.exists() && s.data().legacyOpenOrderRead === true ? 'legacy_open' : 'candidates';
-  } catch (e) { return 'candidates'; }
-}
-export function getDispatchQuery(driverUid, mode = 'candidates') {
-  if (mode === 'legacy_open') {
-    return query(collection(db, 'orders'), where('status', '==', ORDER_STATUS.SEARCHING_DRIVER), where('driverId', '==', null));
-  }
+// AUDIT-2026 (P0 Driver Privacy): المندوب يستعلم فقط عن الطلبات اللي هو مرشح ليها (array-contains uid) - الـ Rules ترفض أي استعلام أوسع.
+// candidateDriverIds بيكتبها الـ Backend dispatcher فقط (functions/index.js). مفيش وضع Legacy مفتوح.
+export function getDispatchQuery(driverUid) {
   return query(collection(db, 'orders'), where('status', '==', ORDER_STATUS.SEARCHING_DRIVER), where('driverId', '==', null),
     where('candidateDriverIds', 'array-contains', driverUid));
 }
@@ -260,10 +250,28 @@ export async function acceptOrderAsDriver(orderId, driverUid, driverName, driver
 // searching_driver فورًا) عشان الاثنين يتسجلوا في statusHistory زي ما اتطلب بالظبط، وبرضه
 // يبقى فيه لحظة merchant_accepted واضحة في الـ Audit Log لو حبينا نفصل بينهم مستقبلًا (مثلاً
 // لو التاجر عايز وقت تحضير قبل ما نبحث عن مندوب).
+// MATLABK: الخطوة الثانية (merchant_accepted -> searching_driver) بتتعاد لحد 3 مرات؛ لو الـ backend (redispatchStale) سبقنا وحرّك الطلب
+// يبقى نجاح. لو فشلت نهائيًا بنرمي 'search-start-failed' (الطلب فعلًا مقبول وهيتحرّك تلقائيًا من الـ backend - مش عالق للأبد).
+async function _startDriverSearch(orderId, actor, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { await transitionOrder(orderId, ORDER_STATUS.SEARCHING_DRIVER, actor); return; }
+    catch (e) {
+      if (e?.message === 'invalid-transition') {
+        if (e.fromStatus === ORDER_STATUS.SEARCHING_DRIVER) return; // اتحرّك بالفعل (backend أو محاولة سابقة)
+        throw e;                                                  // اتلغى/اتغيّر لحالة تانية - مش خطأ شبكة
+      }
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
+  }
+  console.error('[merchantRespond] start-search failed', lastErr);
+  const err = new Error('search-start-failed'); err.cause = lastErr; throw err;
+}
 export async function merchantRespond(orderId, accept, actor) {
   if (accept) {
     await transitionOrder(orderId, ORDER_STATUS.MERCHANT_ACCEPTED, actor);
-    await transitionOrder(orderId, ORDER_STATUS.SEARCHING_DRIVER, actor);
+    await _startDriverSearch(orderId, actor);
   } else {
     await transitionOrder(orderId, ORDER_STATUS.MERCHANT_REJECTED, actor);
   }

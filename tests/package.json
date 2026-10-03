@@ -1,0 +1,14 @@
+{
+  "name": "mova-rules-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "firebase emulators:exec --config ../firebase.json --project go-elmanayef --only firestore \"node --test firestore.rules.test.mjs\"",
+    "contract": "node --test schema-contract.test.mjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.0",
+    "firebase": "^11.0.0",
+    "firebase-tools": "^13.0.0"
+  }
+}

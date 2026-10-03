@@ -1,6 +1,6 @@
 // ===== admin.js — لوحة الإدارة: الطلبات، المستخدمين، المتاجر، التصنيفات، البانرات، الكوبونات، سجل التدقيق =====
 
-import { addDoc, collection, db, deleteDoc, doc, getAggregateFromServer, getCountFromServer, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where, average, count } from './firebase.js';
+import { addDoc, collection, writeBatch, db, deleteDoc, doc, getAggregateFromServer, getCountFromServer, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where, average, count } from './firebase.js';
 import { SL, closeModal, esc, escJs, normalizeStatus, onListenersCleared, onSnapshot, orderStatusBadge, secureCloudinaryUpload, showToast } from './utils.js';
 import { doLogout } from './auth.js';
 import { icon } from './icons.js';
@@ -363,7 +363,23 @@ export async function admUpdOrd(id,status){
     showToast(e?.message==='invalid-transition' ? 'انتقال غير مسموح لهذه الحالة' : 'حدث خطأ','err');
   }
 }
-export async function admAccDrv(uid){try{await updateDoc(doc(db,'users',uid),{status:'active',approvedAt:serverTimestamp(),approvedBy:window.CU.uid,updatedAt:serverTimestamp()});await addDoc(collection(db,'notifications'),{userId:uid,title:'تم قبول حسابك',body:'تم اعتماد حسابك ككابتن توصيل، تقدر تبدأ تستقبل الطلبات الآن.',type:'or',read:false,createdAt:serverTimestamp()});logAudit('قبول كابتن');showToast('تم قبول المندوب','ok');closeModal('drv-modal');}catch(e){showToast('حدث خطأ','err');}}
+
+// ===== MATLABK: عمليات الاعتماد/الرفض/الإيقاف ذرّية (Batch واحد) - لو أي كتابة فشلت، مفيش حاجة بتتغيّر. بدون catch صامت. =====
+async function adminDecision(uid, { withStore, userPatch, storeStatus, notif }) {
+  const b = writeBatch(db);
+  b.update(doc(db,'users',uid), { ...userPatch, updatedAt: serverTimestamp() });
+  if (withStore) b.update(doc(db,'stores',uid), { status: storeStatus, updatedAt: serverTimestamp() });
+  if (notif) b.set(doc(collection(db,'notifications')), { userId: uid, ...notif, read: false, createdAt: serverTimestamp() });
+  await b.commit();
+}
+const approvedPatch = () => ({ status:'active', approvedAt:serverTimestamp(), approvedBy:window.CU.uid });
+const rejectedPatch = (reason) => ({ status:'rejected', rejectReason:reason, rejectionReason:reason, rejectedAt:serverTimestamp(), rejectedBy:window.CU.uid });
+export async function admAccDrv(uid){
+  try{
+    await adminDecision(uid,{withStore:false,userPatch:approvedPatch(),notif:{title:'تم قبول حسابك',body:'تم اعتماد حسابك ككابتن توصيل، تقدر تبدأ تستقبل الطلبات الآن.',type:'or'}});
+    logAudit('قبول كابتن');showToast('تم قبول المندوب','ok');closeModal('drv-modal');
+  }catch(e){ console.error('admAccDrv failed', e); showToast('فشل الاعتماد - لم يتم أي تغيير','err'); }
+}
 // P17 (A2 - Captain Lifecycle): إيقاف/تفعيل/حذف كابتن نشط بالفعل (بعد الموافقة) - كانت موجودة
 // لصفحة "المتاجر" فقط (smQuickPause/smQuickActivate/smDeleteStore)، وده نفس المبدأ بالحرف لكن
 // على users/{uid} مباشرة (المندوب مالوش مستند منفصل زي stores). الحماية الفعلية من قبول طلبات/
@@ -384,24 +400,23 @@ export async function admDrvDelete(uid){
 export function admRejDrv(uid){
   openReasonModal('سبب رفض الكابتن', ['صورة البطاقة غير واضحة','الرخصة منتهية','البيانات غير مطابقة'], async(reason)=>{
     try{
-      await updateDoc(doc(db,'users',uid),{status:'rejected',rejectReason:reason,rejectionReason:reason,rejectedAt:serverTimestamp(),rejectedBy:window.CU.uid,updatedAt:serverTimestamp()});
-      await addDoc(collection(db,'notifications'),{userId:uid,title:'لم تتم الموافقة على حسابك',body:'للأسف لم يتم قبول طلبك ككابتن. السبب: '+reason,type:'gn',read:false,createdAt:serverTimestamp()});
-      logAudit('رفض كابتن', reason);
-      showToast('تم رفض الكابتن','err');
-      closeModal('drv-modal');
-    }catch(e){showToast('حدث خطأ','err');}
+      await adminDecision(uid,{withStore:false,userPatch:rejectedPatch(reason),notif:{title:'لم تتم الموافقة على حسابك',body:'للأسف لم يتم قبول طلبك ككابتن. السبب: '+reason,type:'gn'}});
+      logAudit('رفض كابتن', reason);showToast('تم رفض الكابتن','err');closeModal('drv-modal');
+    }catch(e){ console.error('admRejDrv failed', e); showToast('فشل الرفض - لم يتم أي تغيير','err'); }
   });
 }
-export async function admAccStore(id){try{await updateDoc(doc(db,'users',id),{status:'active',approvedAt:serverTimestamp(),approvedBy:window.CU.uid,updatedAt:serverTimestamp()});await updateDoc(doc(db,'stores',id),{status:'active'}).catch(()=>{});await addDoc(collection(db,'notifications'),{userId:id,title:'تم قبول متجرك',body:'تم اعتماد متجرك على منصة MATLABK، تقدر تضيف منتجاتك وتستقبل الطلبات الآن.',type:'or',read:false,createdAt:serverTimestamp()});logAudit('قبول متجر');showToast('تم قبول المتجر','ok');}catch(e){showToast('حدث خطأ','err');}}
+export async function admAccStore(id){
+  try{
+    await adminDecision(id,{withStore:true,storeStatus:'active',userPatch:approvedPatch(),notif:{title:'تم قبول متجرك',body:'تم اعتماد متجرك على منصة MATLABK، تقدر تضيف منتجاتك وتستقبل الطلبات الآن.',type:'or'}});
+    logAudit('قبول متجر');showToast('تم قبول المتجر','ok');
+  }catch(e){ console.error('admAccStore failed', e); showToast('فشل الاعتماد - لم يتم أي تغيير','err'); }
+}
 export function admRejStore(id){
   openReasonModal('سبب رفض المتجر', ['المستندات غير واضحة','بيانات المتجر غير مكتملة','نشاط غير مسموح به'], async(reason)=>{
     try{
-      await updateDoc(doc(db,'users',id),{status:'rejected',rejectReason:reason,rejectionReason:reason,rejectedAt:serverTimestamp(),rejectedBy:window.CU.uid,updatedAt:serverTimestamp()});
-      await updateDoc(doc(db,'stores',id),{status:'rejected'}).catch(()=>{});
-      await addDoc(collection(db,'notifications'),{userId:id,title:'لم تتم الموافقة على متجرك',body:'للأسف لم يتم قبول طلب انضمام متجرك. السبب: '+reason,type:'gn',read:false,createdAt:serverTimestamp()});
-      logAudit('رفض متجر', reason);
-      showToast('تم رفض المتجر','err');
-    }catch(e){showToast('حدث خطأ','err');}
+      await adminDecision(id,{withStore:true,storeStatus:'rejected',userPatch:rejectedPatch(reason),notif:{title:'لم تتم الموافقة على متجرك',body:'للأسف لم يتم قبول طلب انضمام متجرك. السبب: '+reason,type:'gn'}});
+      logAudit('رفض متجر', reason);showToast('تم رفض المتجر','err');
+    }catch(e){ console.error('admRejStore failed', e); showToast('فشل الرفض - لم يتم أي تغيير','err'); }
   });
 }
 export async function openDrvModal(uid){
@@ -470,14 +485,14 @@ export async function renderAdminStoresList(allStores){
 }
 export async function smQuickPause(uid){
   if(!confirm('هل تريد إيقاف استقبال الطلبات لهذا المتجر مؤقتًا؟')) return;
-  try{ await updateDoc(doc(db,'stores',uid),{status:'paused',updatedAt:serverTimestamp()}); await updateDoc(doc(db,'users',uid),{status:'paused'}).catch(()=>{}); logAudit('إيقاف متجر مؤقتًا'); showToast('تم الإيقاف','ok'); }catch(e){showToast('حدث خطأ','err');}
+  try{ await adminDecision(uid,{withStore:true,storeStatus:'paused',userPatch:{status:'paused'}}); logAudit('إيقاف متجر مؤقتًا'); showToast('تم الإيقاف','ok'); }catch(e){showToast('حدث خطأ','err');}
 }
 export async function smQuickActivate(uid){
-  try{ await updateDoc(doc(db,'stores',uid),{status:'active',updatedAt:serverTimestamp()}); await updateDoc(doc(db,'users',uid),{status:'active'}).catch(()=>{}); logAudit('تفعيل متجر'); showToast('تم التفعيل','ok'); }catch(e){showToast('حدث خطأ','err');}
+  try{ await adminDecision(uid,{withStore:true,storeStatus:'active',userPatch:{status:'active'}}); logAudit('تفعيل متجر'); showToast('تم التفعيل','ok'); }catch(e){showToast('حدث خطأ','err');}
 }
 export async function smQuickDelete(uid){
   if(!confirm('هل أنت متأكد من حذف هذا المتجر؟ لا يمكن التراجع عن هذا الإجراء. سجل طلباته المالي لن يُحذف.')) return;
-  try{ await updateDoc(doc(db,'stores',uid),{status:'deleted',updatedAt:serverTimestamp()}); await updateDoc(doc(db,'users',uid),{status:'deleted'}).catch(()=>{}); logAudit('حذف متجر', uid); showToast('تم حذف المتجر','ok'); }catch(e){showToast('حدث خطأ','err');}
+  try{ await adminDecision(uid,{withStore:true,storeStatus:'deleted',userPatch:{status:'deleted'}}); logAudit('حذف متجر', uid); showToast('تم حذف المتجر','ok'); }catch(e){showToast('حدث خطأ','err');}
 }
 export async function openStoreManage(uid){
   window.smCurrentStore = uid;
@@ -535,8 +550,9 @@ export async function smSaveProfile(){
   };
   if(!payload.storeName){ showToast('اسم المتجر مطلوب','err'); return; }
   try{
-    await updateDoc(doc(db,'stores',uid), payload);
-    await updateDoc(doc(db,'users',uid), {storeName:payload.storeName, storePhone:payload.storePhone, address:payload.address}).catch(()=>{});
+    { const b = writeBatch(db); b.update(doc(db,'stores',uid), payload);
+      b.update(doc(db,'users',uid), {storeName:payload.storeName, storePhone:payload.storePhone, address:payload.address});
+      await b.commit(); }
     logAudit('تعديل بيانات متجر', payload.storeName);
     document.getElementById('sm-title').textContent = payload.storeName;
     showToast('تم حفظ بيانات المتجر','ok');
@@ -588,8 +604,7 @@ export async function smSetAccountStatus(status){
   if(!window.smCurrentStore) return;
   if(status==='paused' && !confirm('هل تريد إيقاف استقبال الطلبات لهذا المتجر مؤقتًا؟')) return;
   try{
-    await updateDoc(doc(db,'stores',window.smCurrentStore),{status: status==='paused'?'paused':'active', updatedAt:serverTimestamp()});
-    await updateDoc(doc(db,'users',window.smCurrentStore),{status: status==='paused'?'paused':'active'}).catch(()=>{});
+    await adminDecision(window.smCurrentStore,{withStore:true,storeStatus:status==='paused'?'paused':'active',userPatch:{status:status==='paused'?'paused':'active'}});
     logAudit(status==='paused'?'إيقاف متجر مؤقتًا':'تفعيل متجر');
     showToast('تم التحديث','ok');
   }catch(e){ showToast('حدث خطأ','err'); }
@@ -598,8 +613,7 @@ export async function smDeleteStore(){
   if(!window.smCurrentStore) return;
   if(!confirm('هل أنت متأكد من حذف هذا المتجر؟ لا يمكن التراجع عن هذا الإجراء.')) return;
   try{
-    await updateDoc(doc(db,'stores',window.smCurrentStore),{status:'deleted',updatedAt:serverTimestamp()});
-    await updateDoc(doc(db,'users',window.smCurrentStore),{status:'deleted'}).catch(()=>{});
+    await adminDecision(window.smCurrentStore,{withStore:true,storeStatus:'deleted',userPatch:{status:'deleted'}});
     logAudit('حذف متجر');
     showToast('تم حذف المتجر','ok');
     closeStoreManage();

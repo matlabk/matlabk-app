@@ -8,6 +8,19 @@ export function normalizePhone(p) { return String(p == null ? '' : p).trim().rep
 // نفس شرط الـ Rules (10..15 حرف) + أرقام فقط وعلامة + اختيارية
 export function isValidPhoneStrict(p) { const n = normalizePhone(p); return /^\+?\d{10,14}$/.test(n) && n.length <= 15; }
 
+// مطابق لـ driverSubmitComplete في firestore.rules
+export function isDriverDataComplete(u) {
+  return !!u && typeof u.fullName === 'string' && u.fullName.trim().length >= 2 && isValidPhoneStrict(u.phone) &&
+    typeof u.nationalId === 'string' && u.nationalId.length === 14 &&
+    !!u.vehicleType && !!u.plateNumber && u.docsSubmitted === true && !!u.docs && typeof u.docs === 'object' && Object.keys(u.docs).length > 0;
+}
+// pending بدون بيانات مكتملة = ليس طلبًا مقدَّمًا فعليًا -> يُعامل incomplete (Normalization على مستوى الواجهة؛ الترحيل الفعلي: scripts/normalize-pending.mjs)
+export function effectiveStatus(u) {
+  if (!u) return undefined;
+  if (u.role === 'driver' && u.status === STATUS.PENDING && !isDriverDataComplete(u)) return STATUS.INCOMPLETE;
+  return u.status;
+}
+
 export function isCustomerProfileComplete(u) {
   return !!u && typeof u.name === 'string' && u.name.trim().length >= 2 && isValidPhoneStrict(u.phone);
 }

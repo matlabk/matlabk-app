@@ -1,151 +1,110 @@
 /**
- * MATLABK backend (Cloud Functions v2) — NOT DEPLOYED / NOT TESTED in this audit.
- * يتطلب خطة Blaze. يغطي:
- *   1) Dispatcher موثوق (orders / rides / external_purchases) يكتب candidateDriverIds بالـ Admin SDK.
- *   2) التحقق الموثوق من المسافة والسعر (Authoritative distance/fare) وتصحيح القيم أو وضع علامة مراجعة.
- * الإعدادات: firebase functions:config أو متغيرات بيئة:  ROUTING_BASE_URL (OSRM-compatible, self-hosted).
- * بعد النشر: ضع settings/dispatch.legacyOpenOrderRead=false (أو احذفه) و window.APP_CONFIG.backendDispatch=true.
+ * MATLABK backend (Cloud Functions v2) — NOT DEPLOYED. أسماء الـ exports كما هي: dispatchOrder, dispatchRide, dispatchExternal,
+ * redispatchStale, verifyOrderDistance, verifyRideDistance, aggregateOrderStats.
+ * المنطق كله في lib/dispatch-core.js (مُختبَر محليًا في tests/functions-core.test.mjs)؛ هنا IO فقط (Admin SDK + Transactions).
+ * الإعداد (env): ROUTING_BASE_URL (OSRM-compatible، مطلوب للتحقق الموثوق من المسافة)، وباقي القيم اختيارية (انظر readConfig).
+ * لا ينفع يتشغّل Production قبل: اختبار Emulator + staging. لا يوجد firebase deploy في هذه المرحلة.
  */
 const { onDocumentWritten, onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
+const core = require('./lib/dispatch-core');
+
 admin.initializeApp();
 const db = admin.firestore();
 const FieldValue = admin.firestore.FieldValue;
+const cfg = core.readConfig(process.env);
+const COLL = { order: 'orders', ride: 'rides', external: 'external_purchases' };
 
-const MAX_CANDIDATES = 3;
-const FRESH_MS = 2 * 60 * 1000;           // آخر موقع للمندوب لازم يكون أحدث من دقيقتين
-const ROUTING_BASE_URL = process.env.ROUTING_BASE_URL; // مطلوب للتحقق الموثوق من المسافة
-const DIST_TOLERANCE = { ratio: 0.15, absKm: 1 };
+const withTs = (patch) => Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, v === core.SERVER_TS ? FieldValue.serverTimestamp() : v]));
 
-const toRad = (d) => (d * Math.PI) / 180;
-function haversineKm(a, b) {
-  const R = 6371, dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
-  const x = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(x));
-}
-
-async function pickCandidates(target, { exclude = [], vehicleTypes = null } = {}) {
-  const snap = await db.collection('users')
-    .where('role', '==', 'driver').where('status', '==', 'active').where('isOnline', '==', true).get();
-  const now = Date.now();
-  return snap.docs
-    .map((d) => ({ id: d.id, ...d.data() }))
-    .filter((u) => !exclude.includes(u.id)
-      && !u.activeOrderId && !u.activeRideId && !u.activeExternalPurchaseId
-      && typeof u.lat === 'number' && typeof u.lng === 'number'
-      && u.lastSeen && now - u.lastSeen.toMillis() <= FRESH_MS
-      && (!vehicleTypes || vehicleTypes.includes(u.vehicleType)))
-    .map((u) => ({ id: u.id, km: haversineKm(target, { lat: u.lat, lng: u.lng }) }))
-    .sort((a, b) => a.km - b.km)
-    .slice(0, MAX_CANDIDATES)
-    .map((c) => c.id);
-}
-
-// ---------- orders: searching_driver -> candidateDriverIds ----------
-exports.dispatchOrder = onDocumentWritten('orders/{id}', async (event) => {
-  const after = event.data.after.exists ? event.data.after.data() : null;
-  if (!after || after.status !== 'searching_driver' || after.driverId) return;
-  if ((after.candidateDriverIds || []).length > 0) return;       // idempotent
-  const target = { lat: after.storeLat ?? after.customerLat, lng: after.storeLng ?? after.customerLng };
-  if (typeof target.lat !== 'number') return;
-  const ids = await pickCandidates(target);
-  await event.data.after.ref.update({
-    candidateDriverIds: ids, dispatchedAt: FieldValue.serverTimestamp(),
-    dispatchRound: (after.dispatchRound || 0) + 1,
-  });
-});
-
-// ---------- rides / external: requested -> driver_offered ----------
-async function dispatchOffer(ref, data, target, vehicleTypes) {
-  if (data.status !== 'requested' || data.driverId) return;
-  const ids = await pickCandidates(target, { vehicleTypes });
-  if (!ids.length) return;
-  await db.runTransaction(async (t) => {
-    const cur = await t.get(ref);
-    if (cur.data().status !== 'requested') return;                // سباق: اتعالج بالفعل
-    t.update(ref, {
-      status: 'driver_offered', candidateDriverIds: ids, rejectedDriverIds: [],
-      offeredAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
-      dispatchLog: [...(cur.data().dispatchLog || []).slice(-18), { event: 'backend_dispatch', at: Date.now(), candidateCount: ids.length }],
+// IO حقيقي (Admin SDK). applyPatch = Transaction بـ precondition (يمنع تكرار/سباق الـ dispatch).
+const io = {
+  now: () => Date.now(),
+  async getDoc(kind, id) { const s = await db.collection(COLL[kind]).doc(id).get(); return s.exists ? s.data() : null; },
+  async loadDrivers() {
+    const s = await db.collection('users').where('role', '==', 'driver').where('status', '==', 'active').where('isOnline', '==', true).get();
+    return s.docs.map((d) => ({ id: d.id, ...d.data() }));
+  },
+  async getPricing() { const s = await db.doc('settings/pricing').get(); return s.exists ? s.data() : null; },
+  routeKm: (a, b) => core.fetchRouteKm({ fetchFn: fetch, baseUrl: cfg.routingBaseUrl, a, b, timeoutMs: cfg.routingTimeoutMs }),
+  async applyPatch(kind, id, expected, patch) {
+    const ref = db.collection(COLL[kind]).doc(id);
+    return db.runTransaction(async (t) => {
+      const cur = await t.get(ref);
+      if (!cur.exists || !core.sameDispatchState(expected, cur.data())) return false;
+      t.update(ref, withTs(patch));
+      return true;
     });
-  });
-}
-exports.dispatchRide = onDocumentWritten('rides/{id}', async (e) => {
-  const d = e.data.after.exists ? e.data.after.data() : null;
-  if (d) await dispatchOffer(e.data.after.ref, d, d.pickup, ['motorcycle', 'tuktuk', 'car']);
-});
-exports.dispatchExternal = onDocumentWritten('external_purchases/{id}', async (e) => {
-  const d = e.data.after.exists ? e.data.after.data() : null;
-  const p = d && d.pickupLocation;
-  if (d && p) await dispatchOffer(e.data.after.ref, d, { lat: p.latitude, lng: p.longitude }, ['motorcycle', 'tuktuk', 'car']);
-});
+  },
+};
 
-// إعادة محاولة: عروض منتهية (>45s بدون قبول) ترجع requested، وطلبات searching_driver بدون مرشحين تتوسع.
-exports.redispatchStale = onSchedule('every 1 minutes', async () => {
-  const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 45 * 1000);
-  for (const col of ['rides', 'external_purchases']) {
-    const s = await db.collection(col).where('status', '==', 'driver_offered').where('offeredAt', '<', cutoff).get();
-    for (const d of s.docs) await d.ref.update({ status: 'requested', candidateDriverIds: [], rejectedDriverIds: [], updatedAt: FieldValue.serverTimestamp() });
-  }
-  const o = await db.collection('orders').where('status', '==', 'searching_driver').where('driverId', '==', null).get();
-  for (const d of o.docs) {
-    const x = d.data(); if ((x.candidateDriverIds || []).length) continue;
-    const ids = await pickCandidates({ lat: x.storeLat ?? x.customerLat, lng: x.storeLng ?? x.customerLng });
-    if (ids.length) await d.ref.update({ candidateDriverIds: ids, dispatchRound: (x.dispatchRound || 0) + 1 });
-  }
-});
+const safe = (label, fn) => async (...a) => { try { return await fn(...a); } catch (e) { console.error(`[${label}] failed`, e); } };
 
-// ---------- Authoritative distance/fare ----------
-async function serverRouteKm(a, b) {
-  if (!ROUTING_BASE_URL) throw new Error('ROUTING_BASE_URL not configured');
-  const r = await fetch(`${ROUTING_BASE_URL}/route/v1/driving/${a.lng},${a.lat};${b.lng},${b.lat}?overview=false`);
-  const j = await r.json();
-  if (j.code !== 'Ok') throw new Error('routing failed');
-  return Math.round(j.routes[0].distance / 10) / 100;
-}
-function fare(cfg, distanceKm) {
-  const sub = (cfg.baseFare || 0) + distanceKm * (cfg.perKmRate || 0) + (cfg.bookingFee || 0);
-  return Math.round(Math.max(sub, cfg.minimumFare || 0));
-}
-async function verify(ref, data, a, b, serviceType, feeField) {
-  if (typeof data.distanceKm !== 'number') return;
-  const pricing = (await db.doc('settings/pricing').get()).data();
-  const authKm = await serverRouteKm(a, b);
-  const diff = Math.abs(authKm - data.distanceKm);
-  const bad = diff > DIST_TOLERANCE.absKm && diff / Math.max(authKm, 0.1) > DIST_TOLERANCE.ratio;
-  const authFare = fare(pricing[serviceType], authKm);
-  const patch = { distanceCheck: bad ? 'mismatch' : 'ok', authoritativeDistanceKm: authKm, authoritativeFare: authFare, verifiedAt: FieldValue.serverTimestamp() };
-  if (bad) {                                   // تصحيح القيم المالية بقيم السيرفر + علامة مراجعة
-    patch.distanceKm = authKm;
-    patch['pricingSnapshot.finalFare'] = authFare;
-    patch['pricingSnapshot.calculatedDistanceKm'] = authKm;
-    if (feeField) patch[feeField] = authFare;
-    patch.needsReview = true;
-  }
-  await ref.update(patch);
-}
-exports.verifyOrderDistance = onDocumentCreated('orders/{id}', async (e) => {
-  const d = e.data.data();
-  if (typeof d.storeLat === 'number') await verify(e.data.ref, d, { lat: d.storeLat, lng: d.storeLng }, { lat: d.customerLat, lng: d.customerLng }, 'delivery', 'driverFee');
-});
-exports.verifyRideDistance = onDocumentCreated('rides/{id}', async (e) => {
-  const d = e.data.data();
-  await verify(e.data.ref, d, d.pickup, d.dropoff, 'ride', null);
-});
-// ملاحظة: التصحيح بعد الكتابة (post-hoc). النموذج الأقوى: callable createOrder/createRide يحسب المسار والسعر ويكتب
-// بالـ Admin SDK، وقواعد create للعميل تتقفل (allow create: if false). مؤجّل لأنه تغيير معماري أكبر.
+// ---------- triggers: بس عند "دخول" الحالة المطلوبة (مفيش loop من كتابات الـ function نفسها) ----------
+const entered = (e, status) => {
+  const after = e.data.after.exists ? e.data.after.data() : null; const before = e.data.before.exists ? e.data.before.data() : null;
+  return !!after && after.status === status && (!before || before.status !== status);
+};
+exports.dispatchOrder = onDocumentWritten('orders/{id}', safe('dispatchOrder', async (e) => {
+  if (entered(e, 'searching_driver')) console.log('dispatchOrder', e.params.id, await core.dispatchDocument(io, 'order', e.params.id, cfg));
+}));
+exports.dispatchRide = onDocumentWritten('rides/{id}', safe('dispatchRide', async (e) => {
+  if (entered(e, 'requested')) console.log('dispatchRide', e.params.id, await core.dispatchDocument(io, 'ride', e.params.id, cfg));
+}));
+exports.dispatchExternal = onDocumentWritten('external_purchases/{id}', safe('dispatchExternal', async (e) => {
+  if (entered(e, 'requested')) console.log('dispatchExternal', e.params.id, await core.dispatchDocument(io, 'external', e.params.id, cfg));
+}));
 
-// ---------- Stats aggregates (للوحة الإدارة بدل تحميل كل الطلبات) ----------
-exports.aggregateOrderStats = onDocumentWritten('orders/{id}', async (e) => {
+// ---------- تحقق مبكر من المسافة/السعر عند الإنشاء (نفس المنطق اللي بيتنفّذ قبل الـ dispatch؛ idempotent) ----------
+async function verifyEarly(kind, id) {
+  const d = await io.getDoc(kind, id); if (!d) return;
+  const v = await core.planVerification(io, kind, d, cfg);
+  if (Object.keys(v.patch).length) await io.applyPatch(kind, id, d, v.patch);
+}
+exports.verifyOrderDistance = onDocumentCreated('orders/{id}', safe('verifyOrderDistance', (e) => verifyEarly('order', e.params.id)));
+exports.verifyRideDistance = onDocumentCreated('rides/{id}', safe('verifyRideDistance', (e) => verifyEarly('ride', e.params.id)));
+
+// ---------- scheduler: مهلة العرض/تدوير المرشحين/طلبات بلا كابتن/merchant_accepted عالق/EP عالق ----------
+exports.redispatchStale = onSchedule({ schedule: 'every 1 minutes', timeoutSeconds: 120 }, safe('redispatchStale', async () => {
+  const now = Date.now();
+  const drivers = await io.loadDrivers();
+  const cachedIo = { ...io, loadDrivers: async () => drivers };
+  // 1) merchant_accepted عالق -> searching_driver (شبكة أمان لو الخطوة الثانية في merchantRespond فشلت)
+  for (const doc of (await db.collection('orders').where('status', '==', 'merchant_accepted').limit(100).get()).docs) {
+    const d = doc.data(); const plan = core.planAdvanceMerchant(d, now, cfg);
+    if (plan.action === 'update') { await db.runTransaction(async (t) => { const c = await t.get(doc.ref); if (c.data().status === 'merchant_accepted') t.update(doc.ref, withTs(plan.patch)); }); }
+  }
+  // 2) dispatch/تدوير للطلبات والمشاوير والشراء الخارجي
+  const work = [['order', 'orders', 'searching_driver'], ['ride', 'rides', 'requested'], ['ride', 'rides', 'driver_offered'], ['external', 'external_purchases', 'requested'], ['external', 'external_purchases', 'driver_offered']];
+  for (const [kind, col, status] of work) {
+    for (const doc of (await db.collection(col).where('status', '==', status).limit(200).get()).docs) {
+      const d = doc.data(); if (d.dispatchExhausted === true && status !== 'driver_offered') continue;
+      console.log('scheduler', kind, doc.id, await core.dispatchDocument(cachedIo, kind, doc.id, cfg));
+    }
+  }
+  // 3) external purchase عالق على قرار العميل
+  for (const doc of (await db.collection('external_purchases').where('status', 'in', ['item_unavailable', 'budget_exceeded']).limit(100).get()).docs) {
+    const d = doc.data(); const plan = core.planExternalStale(d, now, cfg); if (plan.action !== 'cancel') continue;
+    await db.runTransaction(async (t) => {
+      const c = await t.get(doc.ref); if (c.data().status !== d.status) return;
+      t.update(doc.ref, withTs(plan.patch));
+      if (plan.clearDriver) t.update(db.collection('users').doc(plan.clearDriver), { activeExternalPurchaseId: null });
+      for (const uid of [d.customerId, plan.clearDriver].filter(Boolean)) {
+        t.set(db.collection('notifications').doc(`external_purchase_${doc.id}_cancelled_${uid}`), { userId: uid, title: 'تم إلغاء الطلب', body: 'تم إلغاء الطلب لعدم الرد في الوقت المحدد', type: 'gn', entityType: 'external_purchase', entityId: doc.id, eventKey: 'cancelled', read: false, createdAt: FieldValue.serverTimestamp() });
+      }
+    });
+  }
+}));
+
+// ---------- Stats aggregates (لوحة الإدارة) ----------
+exports.aggregateOrderStats = onDocumentWritten('orders/{id}', safe('aggregateOrderStats', async (e) => {
   const b = e.data.before.exists ? e.data.before.data() : null, a = e.data.after.exists ? e.data.after.data() : null;
   const wasDone = b && b.status === 'delivered', isDone = a && a.status === 'delivered';
   if (wasDone === isDone) return;
   const sign = isDone ? 1 : -1, src = a || b;
   await db.doc('stats/global').set({
-    deliveredOrders: FieldValue.increment(sign),
-    deliveredTotal: FieldValue.increment(sign * (src.total || 0)),
-    commissionTotal: FieldValue.increment(sign * (src.commission || 0)),
-    updatedAt: FieldValue.serverTimestamp(),
+    deliveredOrders: FieldValue.increment(sign), deliveredTotal: FieldValue.increment(sign * (src.total || 0)),
+    commissionTotal: FieldValue.increment(sign * (src.commission || 0)), updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
-});
+}));

@@ -4,7 +4,7 @@ import { average, collection, count, db, doc, getAggregateFromServer, limit, ord
 import { SL, esc, escJs, normalizeStatus, onListenersCleared, onSnapshot, orderStatusBadge, secureCloudinaryUpload, setLoad, showScreen, showToast } from './utils.js';
 import { icon } from './icons.js';
 import { getNextRequestId } from './merchant.js';
-import { ORDER_STATUS, acceptOrderAsDriver, getDispatchMode, getDispatchQuery, transitionOrder, updateDriverLocationForOrder } from './orders.js';
+import { ORDER_STATUS, acceptOrderAsDriver, getDispatchQuery, transitionOrder, updateDriverLocationForOrder } from './orders.js';
 import { updateDriverSelfLocation, initDriverRegLocationMap, destroyDriverRegLocationMap, showDriverMapTab } from './maps.js';
 import { updateDriverLocationForActiveRide, initDriverActiveRideListener, isDriverRideActive } from './rides.js';
 import { listenExternalOffers, initDriverActiveExternalListener, isDriverExternalActive } from './external.js';
@@ -165,7 +165,7 @@ async function _healActiveOrderIdIfCancelled(orderId) {
       const uSnap = await t.get(uRef);
       if (uSnap.data()?.activeOrderId === orderId) t.update(uRef, { activeOrderId: null });
     });
-  } catch (e) { /* Best-effort - لو فشلت هتتصحح تاني مع أي نبضة Snapshot جاية لنفس الطلب */ }
+  } catch (e) { console.error('[heal activeOrderId] failed - هتتعاد مع أي Snapshot جاية لنفس الطلب', e); }
 }
 // بتتنده من داخل loadDriverOrders() (نفس الـ Snapshot الحي) كل ما بيانات طلبات المندوب تتحدّث.
 function _updateHasActiveDeliveryOrder(snap) {
@@ -173,7 +173,7 @@ function _updateHasActiveDeliveryOrder(snap) {
   snap.forEach(d => {
     const st = normalizeStatus(d.data().status);
     if (ACTIVE_DRIVER_ORDER_STATUSES.includes(st)) { has = true; activeId = d.id; }
-    else if (st === ORDER_STATUS.CANCELLED) _healActiveOrderIdIfCancelled(d.id);
+    else if (st === ORDER_STATUS.CANCELLED || st === ORDER_STATUS.DELIVERED) _healActiveOrderIdIfCancelled(d.id); // MATLABK: التسليم كمان بيفضّي activeOrderId لو التصفير المباشر فشل
   });
   _hasActiveDeliveryOrder = has;
   _activeDeliveryOrderId = activeId;
@@ -293,11 +293,9 @@ export let newOrdersUnsub = null;
 export async function listenNewOrders() {
   if (!window.CU) return;
   if (newOrdersUnsub) return;
-  const _dispatchMode = await getDispatchMode();
-  if (newOrdersUnsub) return;
   // جديد: الطلب دلوقتي بيظهر للمندوبين بس لما يبقى searching_driver (يعني بعد ما التاجر
   // يوافق عليه فعليًا) - مش من لحظة إنشائه زي قبل كده. راجع orders.js -> getDispatchQuery().
-  const q = getDispatchQuery(window.CU.uid, _dispatchMode);
+  const q = getDispatchQuery(window.CU.uid);
   newOrdersUnsub = onSnapshot(q, snap => {
     if (!snap.empty && window.onlineStatus) {
       const ord = snap.docs[0]; const o = ord.data();
@@ -397,7 +395,10 @@ export async function updOrdStatus(id, status) {
     await transitionOrder(id, status, actor);
     // جديد: لما المندوب يخلّص الطلب (delivered)، نفضّي activeOrderId عشان يقدر ياخد طلب جديد
     if (status === ORDER_STATUS.DELIVERED && window.CU) {
-      await updateDoc(doc(db,'users',window.CU.uid), {activeOrderId: null}).catch(()=>{});
+      await updateDoc(doc(db,'users',window.CU.uid), {activeOrderId: null}).catch((e) => {
+      console.error('[delivered] failed to clear activeOrderId - self-heal هيعيد المحاولة', e);
+      _healActiveOrderIdIfCancelled(id);
+    });
     }
     const msgs = {driver_arrived:'تم تسجيل وصولك للمتجر', picked_up:'تم استلام الطلب', on_the_way:'في الطريق للعميل', delivered:'تم التسليم بنجاح!'};
     showToast(msgs[status]||'تم التحديث','ok');
@@ -422,7 +423,13 @@ export function toggleOnline(el) {
   if (window.onlineStatus) startGPS();
   else maybeStopGpsIfIdle();
   // Phase 3B: isOnline لازم يتكتب في Firestore فعليًا عشان يبقى قابل للاستعلام وقت الـ Dispatch
-  if (window.CU) updateDoc(doc(db,'users',window.CU.uid), { isOnline: window.onlineStatus }).catch(()=>{});
+  // MATLABK: كتابة الحضور (Online) حساسة - لو الـ Rules رفضتها (مثلًا الحساب مش active) نرجّع الحالة ونبلّغ المستخدم.
+  if (window.CU) updateDoc(doc(db,'users',window.CU.uid), { isOnline: window.onlineStatus }).catch((e) => {
+    console.error('presence write failed', e);
+    window.onlineStatus = false; maybeStopGpsIfIdle();
+    const l = document.getElementById('tog-lbl'); if (l) l.textContent = 'غير متصل';
+    showToast('تعذّر تغيير حالة الاتصال - تأكد أن حسابك معتمد','err');
+  });
 }
 
 // P16 (§6 - Current Active Order): كارت مختصر في الرئيسية لو عند المندوب طلب توصيل جاري -

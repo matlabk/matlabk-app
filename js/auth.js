@@ -317,7 +317,7 @@ export async function submitMerchantProfile() {
     await runTransaction(db, async (t) => {
       const sRef = doc(db,'stores',uid);
       const sd = await t.get(sRef);
-      if (sd.exists()) t.update(sRef, { storeName, storePhone, category, updatedAt: serverTimestamp() });
+      if (sd.exists()) t.update(sRef, { storeName, storePhone, category, ...(sd.data().status === 'rejected' ? { status: 'pending' } : {}), updatedAt: serverTimestamp() });
       else t.set(sRef, { storeName, storePhone, category, status: 'pending', createdAt: serverTimestamp() });
       t.update(doc(db,'users',uid), { status: STATUS.PENDING, updatedAt: serverTimestamp() });
     });

@@ -1,0 +1,1284 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===== HELPERS =====
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    // جديد: نتأكد إن اللي بيتصرف كمندوب هو فعلاً مسجل بدور "driver" ونشط،
+    // مش أي مستخدم مسجل دخول بيبعت الطلب يدوي
+    function isActiveDriver() {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'driver' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'active';
+    }
+    // جديد (Baseline Recovery - Driver Online Enforcement): isActiveDriver() فوق كانت بتتأكد
+    // بس إن المندوب role=='driver' و status=='active'، من غير ما تتأكد إنه Online فعليًا دلوقتي.
+    // يعني مندوب Offline (isOnline==false في users/{uid}) كان يقدر يقبل طلب بمجرد إنه يعدّل
+    // الطلب من المتصفح مباشرة (updateDoc) حتى لو زرار "قبول" مختفي من الواجهة عنده - إخفاء
+    // الزرار مش حماية (راجع القسم 23). isOnlineActiveDriver() هنا هي طبقة الحماية الحقيقية،
+    // وبتتستخدم بس في قبول الطلب (allow update تحت) - باقي الأنظمة (rides/external) متلمساش.
+    function isOnlineActiveDriver() {
+      return isActiveDriver() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isOnline', false) == true;
+    }
+    // جديد (Sprint 3 - Customers Management، القرار 1): حظر فعلي - عميل محظور أو محذوف
+    // (Soft Delete) مايقدرش ينشئ طلب جديد حتى لو قدر يتخطى بوابة الواجهة (routeUser) بأي
+    // طريقة. get() واحدة بس على مستند العميل نفسه (نفس نمط isActiveDriver فوق تمامًا).
+    function isCustomerBlocked() {
+      let st = get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status;
+      return st == 'blocked' || st == 'deleted';
+    }
+
+
+
+    // ===== AUTH-2026 (MATLABK): حالات الحسابات =====
+    // users.status:  customer: active | blocked | deleted
+    //                driver/merchant: incomplete (يكمّل بياناته) -> pending (= pending_review) -> active (= approved، الأدمن فقط)
+    //                                 | rejected (الأدمن فقط) -> pending (إعادة تقديم بعد اكتمال البيانات)
+    // 'pending' و'active' موجودين أصلًا في المشروع (admin.js) فاتبقوا للتوافق مع الحسابات الحالية.
+    function validPhone(p) {
+      return p is string && p.size() >= 10 && p.size() <= 15;
+    }
+    function isApprovedMerchant() {
+      let u = userDocOf(request.auth.uid);
+      return u.get('role', '') == 'merchant' && u.get('status', '') == 'active';
+    }
+    // اكتمال ملف العميل مشتق من البيانات الفعلية في users (مفيش علم profileComplete يقدر العميل يزوّره).
+    function customerProfileComplete() {
+      let u = userDocOf(request.auth.uid);
+      return u.get('status', '') == 'active' &&
+             u.get('name', '') is string && u.get('name', '').size() >= 2 &&
+             validPhone(u.get('phone', ''));
+    }
+    function driverSubmitComplete(d) {
+      return d.get('fullName', '') is string && d.get('fullName', '').size() >= 2 &&
+             validPhone(d.get('phone', '')) &&
+             d.get('nationalId', '') is string && d.get('nationalId', '').size() == 14 &&
+             d.get('vehicleType', '') is string && d.get('vehicleType', '').size() > 0 &&
+             d.get('plateNumber', '') is string && d.get('plateNumber', '').size() > 0 &&
+             d.get('docsSubmitted', false) == true &&
+             d.get('docs', null) is map && d.get('docs', {}).size() > 0;
+    }
+    function merchantSubmitComplete(uid) {
+      let st = getAfter(/databases/$(database)/documents/stores/$(uid)).data;
+      return st.get('storeName', '') is string && st.get('storeName', '').size() > 0 &&
+             validPhone(st.get('storePhone', ''));
+    }
+    function approvalFieldsAbsent(d) {
+      return !d.keys().hasAny(['approvalStatus', 'approvedAt', 'approvedBy', 'rejectedAt', 'rejectedBy', 'rejectReason', 'rejectionReason']);
+    }
+
+    // ===== AUDIT-2026 HELPERS =====
+    // AUTH-2026 (P0): لا يوجد أي مفتاح Legacy للقراءة المفتوحة. المندوب يقرأ/يقبل الطلب فقط لو uid ضمن candidateDriverIds
+    // (بيكتبها Backend dispatcher بالـ Admin SDK - functions/index.js:dispatchOrder). مفيش settings/dispatch في الـ Rules.
+    function userDocOf(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+    // الاسم الموثوق للمندوب = نفس منطق الواجهة (fullName ثم name) لكن من users/{uid} مش من العميل.
+    function realDriverName(uid) {
+      let u = userDocOf(uid);
+      return u.get('fullName', '') != '' ? u.fullName : u.get('name', '');
+    }
+    function isEligibleDriverUid(uid) {
+      let u = userDocOf(uid);
+      return u.get('role', '') == 'driver' && u.get('status', '') == 'active' && u.get('isOnline', false) == true;
+    }
+    function eligibleCandidateAt(ids, i) {
+      return i >= ids.size() || isEligibleDriverUid(ids[i]);
+    }
+    // 1..3 مرشحين، كل واحد فعلاً مندوب نشط Online (مش UID عشوائي/وهمي/محظور).
+    // ملاحظة صريحة: ده مش بديل عن Dispatcher خلفي - العميل لسه هو اللي بيختار أي 3 مندوبين
+    // مؤهلين. المنع الكامل للتلاعب بالاختيار (Collusion) محتاج Backend.
+    function candidatesEligible(ids) {
+      return ids is list && ids.size() >= 1 && ids.size() <= 3 &&
+             eligibleCandidateAt(ids, 0) && eligibleCandidateAt(ids, 1) && eligibleCandidateAt(ids, 2);
+    }
+    // سقف المسافة: Road distance مستحيل تتجاوز عامل * (مجموع فرق الإحداثيات بالكم L1) + هامش.
+    // L1 >= Euclid دايمًا، فالحد ده محافظ (لا يرفض رحلة حقيقية). العامل قابل للضبط من
+    // settings/pricing.maxRoadFactor (الافتراضي 3). + سقف مطلق 200 كم.
+    function coordDistanceCeilKm(lat1, lng1, lat2, lng2) {
+      let dLat = (lat1 > lat2 ? lat1 - lat2 : lat2 - lat1) * 111.0;
+      let dLng = (lng1 > lng2 ? lng1 - lng2 : lng2 - lng1) * 111.0;
+      let factor = pricingConfig().get('maxRoadFactor', 3);
+      let ceil = (dLat + dLng) * factor + 3.0;
+      return ceil < 200.0 ? ceil : 200.0;
+    }
+    function distanceKmPlausible(distanceKm, lat1, lng1, lat2, lng2) {
+      return distanceKmConsistentWithCoords(distanceKm, lat1, lng1, lat2, lng2) &&
+             distanceKm <= coordDistanceCeilKm(lat1, lng1, lat2, lng2);
+    }
+    function isCloudinaryUrl(v) {
+      return v == null || v == '' ||
+        (v is string && v.size() <= 1000 && v.matches('https://res\\.cloudinary\\.com/yfohr6xd/.*'));
+    }
+
+    // ===== ORDER PRICE VALIDATION (بديل مجاني للـ Cloud Function - محتاج خطة Blaze) =====
+    // بنتحقق من كل صنف في الطلب مقابل سعره الحقيقي في /products وقت الإنشاء، وبنعيد
+    // بناء الإجمالي الحقيقي منهم. الطلبات مسموح بيها بحد أقصى 12 صنف، عشان قواعد
+    // Firestore فيها حد أقصى لعدد استعلامات get() المسموحة في نفس التقييم.
+    function itemMatchesProduct(item) {
+      let p = get(/databases/$(database)/documents/products/$(item.id)).data;
+      return item.qty is int && item.qty > 0 && item.qty <= 50 &&
+        item.price is number && item.price == p.price &&
+        p.merchantId == request.resource.data.storeId &&
+        p.get('available', true) != false &&
+        (!(p.get('stock', null) is number) || p.stock >= item.qty);
+    }
+
+    // ===== COMMISSION / DRIVER FEE VALIDATION (جديد) =====
+    // بنجيب نسبة العمولة الحقيقية من settings/commission (بدل قيمة ثابتة في المتصفح
+    // ممكن حد يغيّرها). سايبين هامش ±1 جنيه بس للتعامل مع فروق التقريب (Math.round في الكود).
+    function commissionRate() {
+      return get(/databases/$(database)/documents/settings/commission).data.rate;
+    }
+    function commissionOk() {
+      let expected = realOrderTotal() * commissionRate() / 100;
+      return request.resource.data.commission >= expected - 1 &&
+             request.resource.data.commission <= expected + 1;
+    }
+    // ===== SHARED PRICING VALIDATION (جديد - Ride Service Integration Plan، القرار 2+3+4) =====
+    // بديل عن الرقم الثابت 0.15 اللي كان هنا قبل كده. نفس معادلة js/pricing.js بالحرف الواحد،
+    // لكن مكتوبة بلغة الـ Rules (مفيش طريقة نشارك كود JS فعلي مع الـ Rules، فلازم أي تعديل
+    // في js/pricing.js يترافق بتعديل مطابق هنا - موثّق في الطرفين).
+    function pricingConfig() {
+      return get(/databases/$(database)/documents/settings/pricing).data;
+    }
+    function expectedFare(serviceType, distanceKm) {
+      let cfg = pricingConfig()[serviceType];
+      let subtotal = cfg.get('baseFare', 0) + (distanceKm * cfg.get('perKmRate', 0)) + cfg.get('bookingFee', 0);
+      let minFare = cfg.get('minimumFare', 0);
+      return subtotal > minFare ? subtotal : minFare;
+    }
+    // ===== P18.2 (Phase 11) — فحص اتساق المسافة مع الإحداثيات =====
+    // كان distanceKm بيتفحص نوع/إشارة بس (رقم موجب) من غير أي مقارنة بالإحداثيات المخزّنة في
+    // نفس المستند - عميل خبيث كان يقدر يبعت distanceKm صغيرة جدًا (مثلاً 0.5) مع إحداثيات
+    // حقيقية بعيدة فعليًا (20 كم)، فتنتج driverFee/pricingSnapshot صغيرة لكن "متسقة رياضيًا" مع
+    // بعضها بالكامل (كل الفحوصات التانية بتعدي عادي). مفيش sqrt()/sin()/cos() متاحة في لغة الـ
+    // Rules (CEL) عشان نحسب Haversine حقيقي، فبنستخدم حد أدنى تقريبي محافظ (Conservative Lower
+    // Bound) بس بضرب فرق الإحداثيات في تقريب كم/درجة - المسافة الحقيقية (خط مستقيم أو طريق) ميقدرش
+    // يكون أصغر من الحد الأدنى ده أبدًا، فمفيش أي احتمال نرفض رحلة قصيرة حقيقية بالغلط؛ الهدف فقط
+    // إمساك التلاعب الفج (تقصير المسافة المُعلنة بشكل كبير) - مش حساب مسافة دقيقة (ده شغل
+    // Routing API زي ما هو، مش شغل الـ Rules).
+    function coordDistanceFloorKm(lat1, lng1, lat2, lng2) {
+      let latDiffKm = (lat1 > lat2 ? lat1 - lat2 : lat2 - lat1) * 111.0;
+      let lngDiffKm = (lng1 > lng2 ? lng1 - lng2 : lng2 - lng1) * 85.0;
+      return latDiffKm > lngDiffKm ? latDiffKm : lngDiffKm;
+    }
+    // هامش تسامح 1.5 كم لفروق GPS/تقريب قريب من نقطة الالتقاء - مش قرار عمل جديد، مجرد حماية
+    // من False Positive على رحلة قصيرة حقيقية جدًا.
+    function distanceKmConsistentWithCoords(distanceKm, lat1, lng1, lat2, lng2) {
+      return distanceKm >= coordDistanceFloorKm(lat1, lng1, lat2, lng2) - 1.5;
+    }
+    // ===== P18.2.1 — إغلاق ثغرتي P18.2 المؤكدتين (Missing-coordinate bypass + untrusted store
+    // coords) لطلبات التوصيل =====
+    // Finding A كان: `!(coords موجودة) || distanceConsistent(...)` - لو العميل ببساطة ماسابش
+    // الحقول دي في الـ Write أصلًا، الشرط الأول بيرجع true فورًا ويتجاوز الفحص بالكامل. راجعنا
+    // js/orders.js فعليًا: العميل الشرعي **مستحيل** يبعت distanceKm رقم موجب من غير storeLat/Lng
+    // و customerLat/Lng صحيحين في نفس اللحظة (isValidCoord() على الاتنين قبل أي نداء لـ
+    // getRoute()) - يبقى اشتراط وجودهم لما distanceKm رقم موجب مايكسرش أي مسار شرعي، وبيقفل
+    // الثغرة تمامًا بدل ما "يسمح لو ناقصين".
+    // Finding B كان: storeLat/storeLng بيتاخدوا من request.resource.data (كلام العميل) مش من
+    // /stores/{storeId} الحقيقي - رغم إن js/orders.js نفسه بالفعل بيجيبهم بـ getDoc() من نفس
+    // الكوليكشن قبل الكتابة (sd.lat/sd.lng) قبل ما يحطهم في الطلب. storeDistanceOk() تحت بتستبدل
+    // الاعتماد على كلام العميل بقراءة get() حقيقية لنفس المستند.
+    // ملاحظة ميزانية get(): itemOk()/itemMatchesProduct() فوق بيستهلكوا get() واحد لكل صنف
+    // (لحد 12 صنف حاليًا) - إضافة get() واحد هنا بس، ومربوط بـ || Short-circuit فبيتنفذ بس لما
+    // distanceKm رقم موجب فعلاً (مش في كل Write) - في حالة نادرة لطلب بأقصى عدد أصناف (12) +
+    // مسافة حقيقية، الإجمالي ممكن يوصل 13 نداء get() في نفس التقييم، وده أعلى من الحد الكلاسيكي
+    // المُوثّق (10) لعمليات Firestore Rules - لو ده سبب رفض لطلبات كبيرة شرعيًا، الحل الصحيح مستقبلًا
+    // تقليل الحد الأقصى لعدد الأصناف في itemOk() (مش شيء نغيّره هنا، خارج نطاق P18.2.1 الجراحي).
+    function storeDistanceOk(storeId, distanceKm, custLat, custLng) {
+      let s = get(/databases/$(database)/documents/stores/$(storeId)).data;
+      return s.lat is number && s.lng is number &&
+        distanceKmPlausible(distanceKm, s.lat, s.lng, custLat, custLng);
+    }
+    function orderDistanceKmWithCoordsOk(d) {
+      return d.distanceKm is number && d.distanceKm > 0 &&
+        d.customerLat is number && d.customerLng is number &&
+        storeDistanceOk(d.storeId, d.distanceKm, d.customerLat, d.customerLng);
+    }
+    // AUDIT-2026: المتجر لازم يكون active ومفتوح (نفس مستند stores اللي storeDistanceOk بتقراه - كاش).
+    function orderStoreActiveOk(storeId) {
+      let s = get(/databases/$(database)/documents/stores/$(storeId)).data;
+      return s.get('status', '') == 'active' && s.get('isOpen', true) != false;
+    }
+    function orderDistanceKmOk() {
+      let d = request.resource.data;
+      return (!('distanceKm' in d) || d.distanceKm == null) || orderDistanceKmWithCoordsOk(d);
+    }
+    function driverFeeOk() {
+      // جديد (P4 - Model B): المسافة الحقيقية (لو موجودة/صالحة) بتدخل في حساب الأجرة المتوقعة
+      // هنا، بنفس المنطق بالحرف اللي في orders.js->goCheckout() (effectiveDistanceKm) - لو
+      // distanceKm مش موجودة، مش رقم، أو صفر/سالب، بترجع لصفر (Flat) بالظبط زي ما كانت قبل
+      // P4. صفر تعارض ممكن يحصل بين الاتنين لأنهم بيطبّقوا نفس الشرط بالحرف.
+      let effectiveDistance = (
+        'distanceKm' in request.resource.data &&
+        request.resource.data.distanceKm is number &&
+        request.resource.data.distanceKm > 0
+      ) ? request.resource.data.distanceKm : 0;
+      let expected = expectedFare('delivery', effectiveDistance);
+      return request.resource.data.driverFee >= expected - 1 &&
+             request.resource.data.driverFee <= expected + 1 &&
+             request.resource.data.pricingSnapshot is map &&
+             request.resource.data.pricingSnapshot.finalFare == request.resource.data.driverFee &&
+             request.resource.data.pricingSnapshot.pricingVersion == pricingConfig().pricingVersion &&
+             request.resource.data.pricingSnapshot.serviceType == 'delivery';
+    }
+    // ===== RIDE FARE VALIDATION (جديد - Phase 3A Security Hardening) =====
+    // نفس فكرة driverFeeOk() بالحرف، بس لمشوار بدل توصيل. صفر معادلة جديدة - expectedFare()
+    // فوق أصلاً عامة (بتاخد serviceType كباراميتر)، فبس بنستخدمها بـ 'ride' والمسافة الحقيقية
+    // بدل ما تكون 0 زي التوصيل. مصدر الحساب الوحيد يفضل js/pricing.js->calculateFare().
+    function rideFareOk() {
+      let expected = expectedFare('ride', request.resource.data.distanceKm);
+      return request.resource.data.pricingSnapshot is map &&
+             request.resource.data.pricingSnapshot.finalFare is number &&
+             request.resource.data.pricingSnapshot.finalFare >= expected - 1 &&
+             request.resource.data.pricingSnapshot.finalFare <= expected + 1 &&
+             request.resource.data.pricingSnapshot.pricingVersion == pricingConfig().pricingVersion &&
+             request.resource.data.pricingSnapshot.serviceType == 'ride';
+    }
+    // الحد الأقصى للمسافة من settings/pricing.ride.maxDistanceKm فقط - لو مش متحدد (0 أو مفيش)
+    // يبقى مفيش تقييد، بالظبط زي منطق isWithinMaxDistance() في js/rides.js.
+    function rideDistanceOk() {
+      let maxKm = pricingConfig().get('ride', {}).get('maxDistanceKm', 0);
+      return maxKm <= 0 || (request.resource.data.distanceKm is number && request.resource.data.distanceKm <= maxKm);
+    }
+
+    // ===== RIDE UPDATE PATHS (جديد - Phase 3B) - كل واحدة بتمنع لمس بيانات الطلب/السعر =====
+    function rideCoreUnchanged() {
+      return request.resource.data.customerId == resource.data.customerId &&
+             request.resource.data.pickup == resource.data.pickup &&
+             request.resource.data.dropoff == resource.data.dropoff &&
+             request.resource.data.distanceKm == resource.data.distanceKm &&
+             request.resource.data.pricingSnapshot == resource.data.pricingSnapshot &&
+             request.resource.data.vehicleType == resource.data.vehicleType &&
+             request.resource.data.createdAt == resource.data.createdAt;
+    }
+    // مسار 1: العميل بيبدأ/يعيد محاولة Dispatch (requested -> driver_offered)
+    function customerDispatchOk() {
+      return resource.data.customerId == request.auth.uid &&
+             resource.data.status == 'requested' &&
+             request.resource.data.status == 'driver_offered' &&
+             request.resource.data.driverId == null &&
+             candidatesEligible(request.resource.data.candidateDriverIds) &&
+             !(request.auth.uid in request.resource.data.candidateDriverIds) &&
+             request.resource.data.rejectedDriverIds.size() == 0 &&
+             request.resource.data.dispatchLog.size() <= 20 &&
+             rideCoreUnchanged();
+    }
+    // مسار 2: سائق مرشح بيقبل (driver_offered -> driver_assigned)
+    function driverAcceptOk() {
+      // نفس get() اللي isActiveDriver() بتعملها على نفس المستند - Firestore بتكاشها فمفيش قراءة إضافية
+      let drv = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return isActiveDriver() &&
+             drv.get('activeRideId', null) == null && drv.get('activeOrderId', null) == null && drv.get('activeExternalPurchaseId', null) == null &&
+             resource.data.status == 'driver_offered' &&
+             resource.data.driverId == null &&
+             request.auth.uid in resource.data.candidateDriverIds &&
+             request.resource.data.status == 'driver_assigned' &&
+             request.resource.data.driverId == request.auth.uid &&
+             request.resource.data.candidateDriverIds == resource.data.candidateDriverIds &&
+             request.resource.data.rejectedDriverIds == resource.data.get('rejectedDriverIds', []) &&
+             request.resource.data.offeredAt == resource.data.offeredAt &&
+             request.resource.data.dispatchLog.size() <= 20 &&
+             // Security Hardening (Phase 4B) - مشتقة حرفيًا من updatePayload الفعلي جوه
+             // acceptRideOffer() في rides.js: driverId + status + dispatchLog دايمًا،
+             // وpickupEtaMinutes بس لو محسوبة (شرطية). أي حقل تاني غير الأربعة دول ممنوع
+             // يتغيّر في نفس التحديث، حتى لو باقي الشروط فوق اتحققت.
+             request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['driverId', 'status', 'dispatchLog', 'pickupEtaMinutes']) &&
+             rideCoreUnchanged();
+    }
+    // مسار 3: سائق مرشح بيرفض (يفضل driver_offered، أو يرجع requested لو ده آخر رفض)
+    function driverRejectOk() {
+      let oldRejected = resource.data.get('rejectedDriverIds', []);
+      let properAppend = oldRejected.concat([request.auth.uid]);
+      return isActiveDriver() &&
+             resource.data.status == 'driver_offered' &&
+             request.auth.uid in resource.data.candidateDriverIds &&
+             !(request.auth.uid in oldRejected) &&
+             request.resource.data.driverId == resource.data.driverId &&
+             request.resource.data.offeredAt == resource.data.offeredAt &&
+             request.resource.data.dispatchLog.size() <= 20 &&
+             (
+               (request.resource.data.status == 'driver_offered' &&
+                request.resource.data.candidateDriverIds == resource.data.candidateDriverIds &&
+                request.resource.data.rejectedDriverIds == properAppend)
+               ||
+               (request.resource.data.status == 'requested' &&
+                properAppend.size() == resource.data.candidateDriverIds.size() &&
+                request.resource.data.candidateDriverIds.size() == 0 &&
+                request.resource.data.rejectedDriverIds.size() == 0)
+             ) &&
+             rideCoreUnchanged();
+    }
+    // ===== RIDE LIFECYCLE CONTINUATION (Phase 4B) - driver_assigned -> driver_arrived ->
+    // in_progress -> completed. مسار رابع بس (زي customerDispatchOk/driverAcceptOk/driverRejectOk
+    // فوق تمامًا) - المندوب المعيّن بس، انتقال واحد صحيح بالخطوة، status بس بتتغيّر،
+    // rideCoreUnchanged() بيمنع أي لمس لبيانات الطلب/السعر مهما كان.
+    function isValidRideLifecycleTransition(from, to) {
+      return (from == 'driver_assigned' && to == 'driver_arrived') ||
+             (from == 'driver_arrived' && to == 'in_progress') ||
+             (from == 'in_progress' && to == 'completed');
+    }
+    function driverLifecycleOk() {
+      return isSignedIn() && resource.data.driverId == request.auth.uid &&
+             isValidRideLifecycleTransition(resource.data.status, request.resource.data.status) &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+             rideCoreUnchanged();
+    }
+    // ===== LIVE DRIVER LOCATION (Phase 4B - البند المؤجل) ===== المندوب المعيّن بس، وبس أثناء
+    // driver_assigned/driver_arrived/in_progress (زي LOCATION_UPDATE_STATUSES في js/rides.js
+    // بالحرف)، وحقل driverLocation لوحده بدون أي حقل تاني (مش حتى status نفسها).
+    function driverLocationUpdateOk() {
+      return isSignedIn() && resource.data.driverId == request.auth.uid &&
+             resource.data.status in ['driver_assigned', 'driver_arrived', 'in_progress'] &&
+             request.resource.data.status == resource.data.status &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['driverLocation']) &&
+             request.resource.data.driverLocation is map &&
+             request.resource.data.driverLocation.lat is number &&
+             request.resource.data.driverLocation.lng is number &&
+             // جديد (P12.1): نفس فحص المدى الموجود في orderDriverLocationUpdateOk تحت بالحرف -
+             // كان ناقص هنا فقط (rides) رغم إن باقي الحماية (Ownership/Status/affectedKeys)
+             // كانت موجودة أصلًا ومطابقة تمامًا لنسخة orders.
+             request.resource.data.driverLocation.lat >= -90 && request.resource.data.driverLocation.lat <= 90 &&
+             request.resource.data.driverLocation.lng >= -180 && request.resource.data.driverLocation.lng <= 180 &&
+             rideCoreUnchanged();
+    }
+
+    // ===== LIVE DRIVER LOCATION - ORDERS (Delivery Tracking Hardening - P7) =====
+    // نفس فلسفة driverLocationUpdateOk() الخاصة بالمشاوير فوق بالحرف تقريبًا، لكن لـ orders:
+    // المندوب المعيّن للطلب بس (resource.data.driverId == request.auth.uid)، وبس أثناء إحدى
+    // حالات التوصيل النشطة الأربعة (زي ACTIVE_DRIVER_ORDER_STATUSES في js/driver.js بالحرف -
+    // driver_assigned/driver_arrived/picked_up/on_the_way)، وحقل driverLocation لوحده بدون أي
+    // حقل تاني (status/driverId/customerId/price/... كلها ممنوعة تتغيّر من هنا). العميل بيقرأ
+    // نفس القيمة دي من نفس مستند الطلب اللي عنده صلاحية قراءته أصلًا (allow read تحت) - مفيش
+    // حاجة تانية لازم تتفتح.
+    function orderDriverLocationUpdateOk() {
+      return isSignedIn() && resource.data.driverId == request.auth.uid &&
+             resource.data.status in ['driver_assigned', 'driver_arrived', 'picked_up', 'on_the_way'] &&
+             request.resource.data.status == resource.data.status &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['driverLocation']) &&
+             request.resource.data.driverLocation is map &&
+             request.resource.data.driverLocation.keys().hasOnly(['lat', 'lng', 'updatedAt']) &&
+             request.resource.data.driverLocation.lat is number &&
+             request.resource.data.driverLocation.lng is number &&
+             request.resource.data.driverLocation.lat >= -90 && request.resource.data.driverLocation.lat <= 90 &&
+             request.resource.data.driverLocation.lng >= -180 && request.resource.data.driverLocation.lng <= 180;
+      // Limitation موثّقة (البند 7 في تعليمات المهمة): مفيش فحص هنا إن updatedAt فعلًا
+      // serverTimestamp() حقيقي (Rules Language مبتفرقش بسهولة/بأمان بين Sentinel وقيمة تانية
+      // في نفس الشرط ده من غير خطر رفض كتابات صحيحة) - المجال محصور فعليًا بمين اللي يقدر
+      // يكتب (المندوب المعيّن بس) وفين (driverLocation بس، طلب نشط بس)، فالمخاطرة الأمنية من
+      // القيمة نفسها محدودة، لكن التوثيق هنا صراحة زي ما اتطلب بدل اختراع Workaround.
+    }
+
+    // ===== ORDER PARTY HELPERS (جديد) =====
+    // بتتستخدم في حماية رقم العميل (Option B) وفي قاعدة الإشعارات تحت.
+    function orderData(orderId) {
+      return get(/databases/$(database)/documents/orders/$(orderId)).data;
+    }
+    function isOrderParty(orderId, uid) {
+      let o = orderData(orderId);
+      return o.customerId == uid || o.storeId == uid || o.driverId == uid;
+    }
+    // جديد (P14.2 - Driver Customer Phone Access): مندوب يقدر يقرا مستند عميل واحد بس - العميل
+    // المرتبط بطلبه النشط الحالي (activeOrderId على مستند المندوب نفسه - قراءة مستند المندوب
+    // لنفسه دايمًا مسموحة أصلًا). العلاقة بتتأكد فعليًا من orders/{activeOrderId} نفسه: لازم
+    // customerId فيه يطابق userId المطلوب قراءته، ولازم driverId فيه يطابق المندوب نفسه فعلاً -
+    // نفس فلسفة isOrderParty() فوق بالحرف. مينفعش مندوب "يزوّر" activeOrderId على مستنده هو
+    // ويأشّر بيه على طلب مش بتاعه أصلاً، لأن الشرط التاني (orderData(...).driverId ==
+    // request.auth.uid) بيتحقق من حقل driverId الحقيقي المخزّن في مستند الطلب نفسه - وده حقل
+    // Rules-Protected (مش أي قيمة المندوب بعتها) عبر فرع القبول في orders/{orderId} allow
+    // update. الصلاحية دي بتتلغي أوتوماتيك لحظة ما activeOrderId يترجع null (تسليم/إلغاء -
+    // driver.js:updOrdStatus عند delivered، وكمان الإصلاح الذاتي الموجود في driver.js للحالات
+    // اللي الطلب فيها اتلغى - راجع البند 16 هناك) - صفر صلاحية دائمة أو عشوائية على أي عميل تاني.
+    function isMyActiveOrderCustomer(userId) {
+      let activeOrderId = get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('activeOrderId', null);
+      return activeOrderId != null &&
+        orderData(activeOrderId).customerId == userId &&
+        orderData(activeOrderId).driverId == request.auth.uid;
+    }
+    // جديد (Ratings Security Fix) - نفس نمط isOrderParty فوق بالحرف: get() واحدة على
+    // orderData(orderId) بس (متكاش لو اتنادت تاني في نفس التقييم). بيتأكد إن الطلب فعلاً
+    // خاص بالعميل ده، وصل لحالة 'delivered' (ORDER_STATUS.DELIVERED في orders.js)، وإن
+    // targetId المبعوت يطابق فعليًا صاحب الطلب الحقيقي (storeId أو driverId) حسب targetType.
+    function ratingOrderValid(orderId, targetType, targetId) {
+      let o = orderData(orderId);
+      return o.customerId == request.auth.uid &&
+             o.status == 'delivered' &&
+             targetId == (targetType == 'store' ? o.storeId : o.driverId);
+    }
+    // جديد (Final Hardening - Notification Pre-emption Mitigation):
+    // المشكلة الموثقة سابقًا: أي طرف في الطلب (عميل/تاجر/مندوب) كان يقدر يعمل setDoc على
+    // notifications/{orderId_eventKey_userId} بمحتوى مزيف قبل ما الحدث الحقيقي يحصل فعليًا -
+    // بما إن الـ create rule كانت بتتحقق بس من isOrderParty + شكل البيانات، مش من إن الحالة
+    // المذكورة في eventKey فعلاً حصلت. النتيجة: ممكن الإشعار المزيف "يحجز" الـ ID فيمنع
+    // الإشعار الحقيقي بعد كده من الكتابة (لأنها هتبقى "update" مش "create"، ومسموح فيها بس
+    // لصاحب الإشعار يبدّل read).
+    // الإصلاح هنا محدود ومضاف فوق البنية الحالية بدون Cloud Functions: لو الإشعار مبعوت
+    // بحقل eventKey، بنتأكد إن حالة الطلب الحالية (orders/{orderId}.status) فعلاً بتطابق
+    // الحدث المذكور وقت الكتابة - يعني مينفعش حد "يحجز" إشعار لحدث لسه ماحصلش. ده مش حل كامل
+    // (لسه فيه Race نظري ضيق جدًا لو حد راقب التغيير وكتب أسرع من الكود الحقيقي)، لكنه بيقفل
+    // أهم جزء من المشكلة (pre-emption لحدث مستقبلي لسه ماحصلش) من غير أي تغيير في orders.js
+    // أو rides أو external_purchases. الإشعارات اللي مالهاش eventKey (زي external.js) مش
+    // متأثرة خالص - الشرط بيتفعّل بس لو eventKey موجود في الطلب.
+    function eventKeyMatchesOrderStatus(orderId, eventKey) {
+      let st = orderData(orderId).status;
+      return (
+        (eventKey == 'merchant_accepted'    && st == 'merchant_accepted') ||
+        (eventKey == 'merchant_rejected'    && st == 'merchant_rejected') ||
+        (eventKey == 'searching_driver'     && st == 'searching_driver')  ||
+        (eventKey == 'driver_assigned'      && st == 'driver_assigned')   ||
+        (eventKey == 'driver_arrived'       && st == 'driver_arrived')    ||
+        (eventKey == 'picked_up'            && st == 'picked_up')        ||
+        (eventKey == 'on_the_way'           && st == 'on_the_way')       ||
+        (eventKey == 'delivered'            && st == 'delivered')        ||
+        (eventKey == 'cancelled'            && st == 'cancelled')        ||
+        (eventKey == 'cancelled_driver'     && st == 'cancelled')        ||
+        (eventKey == 'order_created_merchant' && st == 'waiting_merchant') ||
+        (eventKey == 'order_created_customer' && st == 'waiting_merchant')
+      );
+    }
+    // جديد (Security Audit - Medium #3: Notification Content Spoofing):
+    // eventKeyMatchesOrderStatus() فوق كانت بتتأكد إن الحدث المذكور فعلاً حصل، لكن ماكانتش
+    // بتتأكد من محتوى title/body نفسه - يعني أي طرف حقيقي في الطلب كان يقدر يبعت setDoc
+    // مباشرة (من بره كود التطبيق) بـ eventKey حقيقي مطابق للحالة، لكن بعنوان/نص ملفّق تمامًا
+    // (مثال: "تم إلغاء الطلب من الإدارة" مبعوتة من مندوب للعميل). الدالة دي بتقفل الثغرة دي
+    // بمطابقة title/body مع النص الحقيقي المُولَّد فعليًا من js/orders.js (خريطة STATUS_NOTIF
+    // ونداءات createNotification المباشرة) - أي تعديل مستقبلي في نص أي رسالة هناك لازم
+    // يترافق بتعديل مطابق هنا (نفس فلسفة pricingConfig()/calculateFare() الموثقة فوق).
+    // الحقلين اللي فيهم جزء ديناميكي شرعي (اسم مندوب / اسم عميل + إجمالي) بيتفحصوا بـ .matches()
+    // للحفاظ على الشكل الديناميكي المقصود بدل تجميد نص ثابت بالكامل.
+    function eventKeyAllowedContent(eventKey, title, body) {
+      return
+        (eventKey == 'merchant_accepted' && title == '✅ التاجر وافق على طلبك' && body == 'جاري تجهيز طلبك الآن') ||
+        (eventKey == 'merchant_rejected' && title == '❌ تم رفض طلبك' && body == 'للأسف رفض المتجر طلبك، تواصل معه لمعرفة السبب') ||
+        (eventKey == 'searching_driver'  && title == '🔎 جاري البحث عن مندوب' && body == 'هنبلغك فور ما يتم تعيين مندوب لطلبك') ||
+        (eventKey == 'driver_arrived'    && title == '📍 المندوب وصل للمتجر' && body == 'المندوب استلم مكان التجهيز وهيتحرك قريب') ||
+        (eventKey == 'picked_up'         && title == '📦 تم استلام طلبك' && body == 'المندوب استلم طلبك من المتجر') ||
+        (eventKey == 'on_the_way'        && title == '🛵 طلبك في الطريق' && body == 'المندوب في طريقه إليك الآن') ||
+        (eventKey == 'delivered'         && title == '✅ تم التسليم' && body == 'نتمنى تكون استمتعت بطلبك، قيّم تجربتك!') ||
+        (eventKey == 'cancelled'         && title == '❌ تم إلغاء الطلب' && body == 'تم إلغاء طلبك') ||
+        (eventKey == 'cancelled_driver'  && title == '❌ تم إلغاء الطلب' && body == 'تم إلغاء الطلب اللي كنت مكلف بيه') ||
+        (eventKey == 'driver_assigned'   && title == '🛵 تم تعيين مندوب لطلبك' &&
+          body.matches('.+ في طريقه لاستلام طلبك من المتجر')) ||
+        // ملحوظة: total ممكن يكون رقم عشري (أسعار المنتجات بتتقرا بـ parseFloat في merchant.js)،
+        // فالـ Regex هنا بيسمح بجزء عشري اختياري عشان ما يرفضش إشعارات حقيقية بإجمالي فيه كسور.
+        (eventKey == 'order_created_merchant' && title == '🆕 طلب جديد' &&
+          body.matches('طلب جديد من .+ بقيمة [0-9]+(\\.[0-9]+)? ج')) ||
+        (eventKey == 'order_created_customer' && title == '✅ تم استقبال طلبك!' && body == 'بانتظار موافقة المتجر على طلبك');
+    }
+    // المصدر الحقيقي الوحيد لرقم العميل وقت تعيين المندوب - مش أي قيمة بيبعتها المتصفح
+    function realCustomerPhone(customerId) {
+      return get(/databases/$(database)/documents/users/$(customerId)).data.get('phone', '');
+    }
+    // جديد (Baseline Recovery - Driver Phone Security): نفس فلسفة realCustomerPhone فوق، بس
+    // للمندوب - قبل كده driverPhone كان بيتقبل كأي قيمة يبعتها المندوب في الـ Transaction
+    // (acceptOrderAsDriver) من غير أي تحقق في الـ Rules، فمندوب ممكن يحط رقم مش رقمه الحقيقي
+    // المسجل. دلوقتي لازم يتساوي مع users/{driverId}.phone الحقيقي.
+    function realDriverPhone(driverId) {
+      return get(/databases/$(database)/documents/users/$(driverId)).data.get('phone', '');
+    }
+    function itemOk(idx) {
+      let items = request.resource.data.items;
+      return idx >= items.size() || itemMatchesProduct(items[idx]);
+    }
+    function itemTotal(idx) {
+      let items = request.resource.data.items;
+      return idx < items.size() ? items[idx].price * items[idx].qty : 0;
+    }
+    function realOrderTotal() {
+      return itemTotal(0)+itemTotal(1)+itemTotal(2)+itemTotal(3)+itemTotal(4)+itemTotal(5)+
+             itemTotal(6)+itemTotal(7)+itemTotal(8)+itemTotal(9)+itemTotal(10)+itemTotal(11);
+    }
+    function allItemsOk() {
+      return itemOk(0) && itemOk(1) && itemOk(2) && itemOk(3) && itemOk(4) && itemOk(5) &&
+             itemOk(6) && itemOk(7) && itemOk(8) && itemOk(9) && itemOk(10) && itemOk(11);
+    }
+
+    // ===== USERS =====
+    // ملاحظة: شلنا شرط "resource.data.role == 'merchant'" من allow read، لأنه كان بيسمح
+    // لأي مستخدم مسجل دخول يقرا مستند التاجر كامل (بما فيه docs/ownerPhone/email الخاصة).
+    // بيانات المتجر العامة (الاسم/الهاتف/الفئة) بقت في /stores بدل كده، وهي دي اللي بتتقرأ عمومًا.
+    match /users/{userId} {
+      // جديد (P14.2 - Driver Customer Phone Access): إضافة ضيقة جدًا (isMyActiveOrderCustomer -
+      // تعريفها فوق) بتسمح للمندوب يقرا مستند عميل واحد بس، وبس وقت ما يكون فعلاً هو المندوب
+      // المعيّن على الطلب النشط الحالي بتاع العميل ده - مفيش أي وصول عشوائي لأي users/{customerId}
+      // تاني. راجع orders.js:acceptOrderAsDriver للسبب والسياق الكامل.
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isMyActiveOrderCustomer(userId));
+
+      allow create: if isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.role in ['customer', 'merchant', 'driver'] &&
+        (
+          (request.resource.data.role == 'customer' && request.resource.data.status == 'active') ||
+          (request.resource.data.role != 'customer' && request.resource.data.status == 'incomplete')
+        ) &&
+        approvalFieldsAbsent(request.resource.data) &&
+        request.resource.data.get('name', '') is string && request.resource.data.get('name', '').size() <= 100 &&
+        // AUDIT-2026: حقول مميزة ممنوع تتحدد من العميل وقت إنشاء حسابه
+        request.resource.data.get('points', 0) == 0 &&
+        request.resource.data.get('isOnline', false) == false &&
+        request.resource.data.get('activeOrderId', null) == null &&
+        request.resource.data.get('activeRideId', null) == null &&
+        request.resource.data.get('activeExternalPurchaseId', null) == null;
+
+      allow update: if isAdmin() || (
+        isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.role != 'admin' &&
+        // AUTH-2026: المستخدم لا يغيّر حالته إلا incomplete|rejected -> pending بشرط اكتمال البيانات الفعلي.
+        // active/rejected/blocked للأدمن فقط. لا يوجد active -> pending.
+        (resource.data.role != 'driver' || request.resource.data.status != 'pending' || driverSubmitComplete(request.resource.data)) &&
+        (request.resource.data.status == resource.data.status ||
+         (request.resource.data.status == 'pending' && resource.data.status in ['incomplete', 'rejected'] &&
+          (resource.data.role == 'driver' ? driverSubmitComplete(request.resource.data)
+            : (resource.data.role == 'merchant' ? merchantSubmitComplete(request.auth.uid) : false)))) &&
+        // P18.1 (Goal B): الحد الوقائي اللي كان هنا (points <= +500 في المرة الواحدة) اتشال -
+        // كان بيحد حجم كل Write لوحدها بس مايمنعش تكرارها آلاف المرات (+500 في Loop = رصيد بلا
+        // حدود). المصدر الوحيد الحقيقي لنقاط العميل دلوقتي هو orders.js وقت إنشاء الطلب - وده
+        // بالتصميم الحالي عملية client-trust (بدون Transaction تربطها بالطلب نفسه أو Cloud
+        // Function تتحقق منها) - فمفيش طريقة آمنة تسمح بيها من غير Backend موثوق (راجع Deferred
+        // في التقرير). points بقت Admin-only حتى إشعار آخر - راجع orders.js لمعالجة فشل هذه
+        // الكتابة بأمان (الطلب نفسه بينجح دايمًا بغض النظر عن نتيجة تحديث النقاط).
+        // جديد (P14.3 - Users Self-Write Hardening): قبل كده role=='driver' (وأي role تاني
+        // غير customer) كان من غير أي hasOnly خالص - يقدر يعدّل أي حقل تاني في مستنده (حتى لو
+        // مش من ضمن role/status/points المتحققين فوق). دلوقتي كل role عنده allow-list دقيقة
+        // مبنية فعليًا من جرد كامل لكل كتابة self-update موجودة في الكود (driver.js, orders.js,
+        // rides.js, external.js) - مقسّمة لفروع منفصلة حسب نوع العملية (بدل قائمة واحدة
+        // مجمّعة) عشان "Field Injection" (مثال: {lat, lng, role:'admin'} أو {isOnline:true,
+        // status:'approved'}) يترفض حتى لو الحقول التانية كانت شكلها آمن - كل فرع بيحدد
+        // بالظبط مجموعة الحقول المسموحة سوا في نفس العملية، مش اتحاد كل الحقول المسموحة عمومًا.
+        (
+          // ===== Customer (P14.1 - بدون تغيير) =====
+          (resource.data.role == 'customer' &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'phone', 'address', 'updatedAt']) &&
+            (!('name' in request.resource.data.diff(resource.data).affectedKeys()) ||
+             (request.resource.data.name is string && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 100)) &&
+            (!('phone' in request.resource.data.diff(resource.data).affectedKeys()) || validPhone(request.resource.data.phone)) &&
+            (!('address' in request.resource.data.diff(resource.data).affectedKeys()) ||
+             (request.resource.data.address is string && request.resource.data.address.size() <= 300))) ||
+          // ===== Driver (P14.3 - جديد) =====
+          (resource.data.role == 'driver' && (
+            // GPS (driver.js:44,96) - lat/lng مع lastSeen اختياري. Number.isFinite-equivalent:
+            // "is number" + bounds صحيحة (لا truthy checks). كل حقل بيتحقق بس لو فعلاً "اتغيّر"
+            // (affectedKeys) - نفس أسلوب stores/{storeId} lat/lng validation الموجود فوق
+            // بالحرف - عشان GPS Heartbeat بإحداثيات مطابقة تمامًا للقيمة السابقة (المندوب واقف
+            // مكانه، بس lastSeen بيتحدّث بـ serverTimestamp() اللي دايمًا قيمة جديدة) ما يترفضش
+            // غلط لمجرد إن lat/lng "مش متغيّرين فعليًا" من وجهة نظر diff().
+            (
+              resource.data.status == 'active' &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lat', 'lng', 'lastSeen']) &&
+              (!('lat' in request.resource.data.diff(resource.data).affectedKeys()) ||
+                (request.resource.data.lat is number && request.resource.data.lat >= -90 && request.resource.data.lat <= 90)) &&
+              (!('lng' in request.resource.data.diff(resource.data).affectedKeys()) ||
+                (request.resource.data.lng is number && request.resource.data.lng >= -180 && request.resource.data.lng <= 180)) &&
+              (!('lastSeen' in request.resource.data.diff(resource.data).affectedKeys()) ||
+                request.resource.data.lastSeen == request.time)
+            ) ||
+            // Online status (driver.js:396) - Boolean بس
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isOnline']) &&
+              request.resource.data.isOnline is bool &&
+              (request.resource.data.isOnline == false || resource.data.status == 'active')
+            ) ||
+            // Active Order (orders.js:acceptOrderAsDriver + driver.js:373,166 clearing/self-heal) -
+            // تعيين (غير null) لازم يتحقق فعليًا إن orders/{activeOrderId}.driverId == المندوب
+            // نفسه (مش أي orderId عشوائي - البند 12 Field Injection Test). التفريغ (null) مسموح
+            // دايمًا - نفس فلسفة "Terminal/Self-Heal flow" الموجودة فعليًا في الكود، ومفيش أي
+            // بيانات حد تاني بتتكشف أو تتغيّر لمجرد إن المندوب يفضّي علمه الشخصي هو.
+            // جديد (P14.3.1 - Atomicity Restored): بيستخدم getAfter() مش get() عمدًا - orders/
+            // {orderId}.driverId وusers/{driverUid}.activeOrderId بيتكتبوا سوا في نفس الـ
+            // Transaction الذرية (orders.js:acceptOrderAsDriver بعد P14.3.1). get() بيرجع
+            // الحالة الملتزم بيها (Committed) قبل الـ Transaction، وده كان هيفشل هنا لأن
+            // orders/{orderId}.driverId لسه معملوش Commit وقت التقييم. getAfter() هي الدالة
+            // الموثّقة رسميًا من Firebase تحديدًا لده: "the projected contents of a document...
+            // as if the current request had succeeded... useful for validating documents that
+            // are part of a batched write or transaction" (راجع Firebase Docs -
+            // rules.firestore.getAfter, وmثال cities/countries المطابق تمامًا في دليل
+            // Transactions and batched writes). لم يتم التحقق من هذا فعليًا عبر Firestore
+            // Emulator في هذه البيئة (غير متاح) - القرار مبني على التوثيق الرسمي المباشر، مش
+            // تخمين، لكنه لسه Not Executed من ناحية Runtime حقيقي.
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeOrderId']) &&
+              (request.resource.data.activeOrderId == null ||
+                getAfter(/databases/$(database)/documents/orders/$(request.resource.data.activeOrderId)).data.driverId == request.auth.uid)
+            ) ||
+            // Active Ride (rides.js:acceptRideOffer + transitionRideStep/self-heal) - نفس فلسفة
+            // Active Order فوق بالحرف (بما فيها استخدام getAfter())، على collection الـ rides.
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeRideId']) &&
+              (request.resource.data.activeRideId == null ||
+                getAfter(/databases/$(database)/documents/rides/$(request.resource.data.activeRideId)).data.driverId == request.auth.uid)
+            ) ||
+            // Active External Purchase (external.js:acceptExternalOffer/epCompleteDelivery) -
+            // نفس فلسفة Active Order فوق بالحرف (بما فيها استخدام getAfter())، على collection
+            // الـ external_purchases.
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeExternalPurchaseId']) &&
+              (request.resource.data.activeExternalPurchaseId == null ||
+                getAfter(/databases/$(database)/documents/external_purchases/$(request.resource.data.activeExternalPurchaseId)).data.driverId == request.auth.uid)
+            ) ||
+            // Driver Registration/Resubmission (driver.js:submitDrvReg) - نفس مجموعة الحقول
+            // بالظبط اللي الكود فعليًا بيبعتها (payload في submitDrvReg) - صفر تخمين. status
+            // لازم يتساوي 'pending' صراحة (زي ما الكود فعليًا بيعمل دايمًا في المسار ده) - مش
+            // "unchanged" بس، عشان يمنع مندوب من محاولة تمرير أي قيمة تانية (زي 'active') من
+            // خلال المسار ده تحديدًا حتى لو الحماية العامة فوق (status in ['pending', ...])
+            // كانت هتمنعها أصلًا - دفاع مزدوج صريح زي ما اتطلب بالظبط.
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'fullName', 'phone', 'dob', 'nationalId', 'emergencyPhone', 'address',
+                'vehicleType', 'vehicleModel', 'vehicleColor', 'plateNumber', 'hasExperience',
+                'location', 'status', 'docsSubmitted', 'docs', 'requestId', 'updatedAt'
+              ]) &&
+              request.resource.data.status in ['incomplete', 'pending', 'rejected']
+            )
+          )) ||
+          // ===== Merchant (والأدوار الأخرى) - جديد (P14.3 - البند 8) =====
+          // الجرد الكامل لكود merchant.js أثبت إنه مفيش أي self-update على users/{uid} خالص -
+          // كل بيانات المتجر التشغيلية موجودة ومتعامل معها في stores/{uid} (اللي عندها
+          // allow-list خاصة بيها فوق، مش متأثرة هنا). فمفيش أي فرع مضاف لـ role=='merchant' هنا
+          // عمدًا - يعني أي محاولة self-update من تاجر على مستند users بتاعه هترفض تلقائيًا
+          // (صفر Legitimate Use Case مثبت من الكود الفعلي - لو ظهرت حاجة جديدة مستقبلًا، تتضاف
+          // بفرع منفصل بنفس الأسلوب، مش hasOnly عامة).
+          (resource.data.role == 'merchant' &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            request.resource.data.status == 'pending' && resource.data.status in ['incomplete', 'rejected']) ||
+          false
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ===== STORES (بيانات عامة عن المتجر - جديد) =====
+    // بيانات آمنة للعرض العام بس (اسم/هاتف/فئة المتجر). البيانات الحساسة (مالك المتجر،
+    // بريده، مستنداته) فضلّت في /users ومش بتتقرأ إلا من صاحبها أو الأدمن.
+    match /stores/{storeId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == storeId &&
+        request.resource.data.status == 'pending' &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'merchant';
+      allow update: if isAdmin() || (
+        isSignedIn() && request.auth.uid == storeId &&
+        // AUTH-2026: حالة المتجر لا يغيّرها التاجر إلا rejected -> pending بالتزامن مع إعادة تقديم users.status=pending (getAfter)
+        (request.resource.data.status == resource.data.status ||
+         (resource.data.status == 'rejected' && request.resource.data.status == 'pending' &&
+          getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('status', '') == 'pending')) &&
+        (!('isOpen' in request.resource.data.diff(resource.data).affectedKeys()) || isApprovedMerchant()) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'storeName', 'storePhone', 'category', 'updatedAt', 'lat', 'lng',
+                    'description', 'isOpen', 'logoUrl', 'address']) &&
+        // جديد (Sprint 3.7 - Store Location): إحداثيات المتجر كانت مش موجودة أصلًا في الـ
+        // schema، وحتى لو كانت موجودة كانت الـ Rules هترفض أي تحديث ليها (مش في القائمة
+        // البيضاء فوق) - يعني معدش أي طريق حتى نظريًا لأي متجر يسجل موقعه الحقيقي. الإضافة
+        // هنا اختيارية بالكامل (لو التاجر مبعتش lat/lng الشرط بيتجاوز) ومحدودة بمدى إحداثيات
+        // صحيح جغرافيًا بس - مفيش أي تغيير على باقي حماية الـ collection.
+        (!('lat' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.lat is number && request.resource.data.lat >= -90 && request.resource.data.lat <= 90)) &&
+        (!('lng' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.lng is number && request.resource.data.lng >= -180 && request.resource.data.lng <= 180)) &&
+        // جديد (P15 - Merchant Store Self-Service): قبل كده الحقول دي كانت Admin-only (بتتكتب
+        // بس من لوحة الأدمن عبر smSaveProfile). دلوقتي التاجر عنده شاشة "المتجر" الخاصة بيه
+        // (merchant.js:mstSaveProfile/mstUploadLogo) وبتبعت بالظبط نفس الحقول دي. كل حقل له
+        // فحص نوع/حجم زي أسلوب lat/lng فوق بالحرف - مفيش توسيع لأي حقل تاني غير المكتوب فعليًا
+        // من الكود، ومفيش أي مسار يقدر بيه التاجر يغيّر status/الموافقة على حسابه من هنا.
+        (!('description' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.description is string && request.resource.data.description.size() <= 500)) &&
+        (!('category' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.category is string && request.resource.data.category.size() <= 50)) &&
+        (!('storeName' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.storeName is string && request.resource.data.storeName.size() <= 200)) &&
+        (!('isOpen' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         request.resource.data.isOpen is bool) &&
+        (!('logoUrl' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         isCloudinaryUrl(request.resource.data.logoUrl)) &&
+        (!('address' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.address is string && request.resource.data.address.size() <= 300))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ===== SETTINGS (نسبة العمولة وغيرها - جديد) =====
+    match /settings/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ===== PRODUCTS ===== (زي ما هي - كانت صح)
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      // P18.1 (Goal C): مجموعة الحقول دي مُستخرجة فعليًا من كل نقاط الكتابة الحقيقية
+      // (merchant.js:saveProd، admin.js:saveEditProd/toggleProdAvail) - مفيش أي حقل مُخترع.
+      allow create: if isSignedIn() && (
+        isAdmin() ||
+        (request.resource.data.merchantId == request.auth.uid &&
+         isApprovedMerchant())
+      ) &&
+        request.resource.data.keys().hasOnly(['merchantId','storeName','name','cat','unit','price','imageUrl','available','stock','createdAt']) &&
+        request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 200 &&
+        request.resource.data.price is number && request.resource.data.price >= 0 && request.resource.data.price <= 1000000 &&
+        request.resource.data.get('cat', '') is string && request.resource.data.get('cat', '').size() <= 50 &&
+        request.resource.data.get('unit', '') is string && request.resource.data.get('unit', '').size() <= 50 &&
+        isCloudinaryUrl(request.resource.data.get('imageUrl', null)) &&
+        (!('available' in request.resource.data) || request.resource.data.available is bool) &&
+        (!('stock' in request.resource.data) || request.resource.data.stock == null || (request.resource.data.stock is number && request.resource.data.stock >= 0));
+      allow update: if isAdmin() || (
+        isSignedIn() && resource.data.merchantId == request.auth.uid &&
+         isApprovedMerchant() &&
+        // ownership/audit fields ثابتة تمامًا بعد الإنشاء - التاجر مايقدرش يغيّرهم حتى لو حاول
+        // يبعتهم بنفس القيمة القديمة عمدًا كجزء من payload أكبر (المقارنة هنا بتتحقق من
+        // القيمة الفعلية في الطلب، مش مجرد استبعادهم من affectedKeys).
+        request.resource.data.merchantId == resource.data.merchantId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','price','unit','imageUrl','stock','available','updatedAt']) &&
+        (!('name' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 200)) &&
+        (!('price' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         (request.resource.data.price is number && request.resource.data.price >= 0 && request.resource.data.price <= 1000000)) &&
+        (!('imageUrl' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         isCloudinaryUrl(request.resource.data.imageUrl)) &&
+        (!('available' in request.resource.data.diff(resource.data).affectedKeys()) || request.resource.data.available is bool) &&
+        (!('stock' in request.resource.data.diff(resource.data).affectedKeys()) ||
+         request.resource.data.stock == null || (request.resource.data.stock is number && request.resource.data.stock >= 0))
+      );
+      allow delete: if isAdmin() ||
+        (isSignedIn() && resource.data.merchantId == request.auth.uid && isApprovedMerchant());
+    }
+
+    // ===== ORDER STATE MACHINE (جديد) =====
+    // نفس خريطة الانتقالات المسموحة الموجودة في js/orders.js (ORDER_TRANSITIONS)، لكن هنا
+    // كطبقة أمان حقيقية: مهما كان الكود في المتصفح بيتحقق صح، برضه لازم القاعدة نفسها ترفض
+    // أي محاولة قفز/رجوع غير منطقي - لو حد عدّل الكود أو نادى Firestore مباشرة من بره التطبيق.
+    function isValidOrderTransition(from, to) {
+      return (from == 'waiting_merchant' && to in ['merchant_accepted','merchant_rejected','cancelled']) ||
+             (from == 'merchant_accepted' && to in ['searching_driver','cancelled']) ||
+             (from == 'searching_driver' && to in ['driver_assigned','cancelled']) ||
+             (from == 'driver_assigned' && to in ['driver_arrived','cancelled']) ||
+             (from == 'driver_arrived' && to in ['picked_up','cancelled']) ||
+             (from == 'picked_up' && to == 'on_the_way') ||
+             (from == 'on_the_way' && to == 'delivered') ||
+             // توافق مع الحالات القديمة لأي طلبات لسه في النظام القديم
+             (from == 'new' && to in ['accepted','cancelled']) ||
+             (from == 'accepted' && to in ['preparing','cancelled']) ||
+             (from == 'preparing' && to in ['ready','cancelled']) ||
+             (from == 'ready' && to == 'delivering') ||
+             (from == 'delivering' && to == 'done');
+    }
+
+    // ===== ORDERS ===== (معدّلة)
+    match /orders/{orderId} {
+      // المندوبين النشطين يشوفوا الطلب بس لما يبقى searching_driver فعليًا (يعني بعد ما
+      // التاجر يوافق) - مش من لحظة إنشائه. الحالات القديمة اتسابت هنا عشان أي طلب قديم
+      // لسه في النظام القديم ميختفيش من حوض المندوبين فجأة.
+      allow read: if isSignedIn() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.storeId == request.auth.uid ||
+        resource.data.driverId == request.auth.uid ||
+        // AUDIT-2026 (P0 Driver Privacy): المندوب (active) يقرا الطلب بس لو هو مرشح (candidateDriverIds).
+        (resource.data.status == 'searching_driver' && resource.data.driverId == null && isActiveDriver() &&
+          request.auth.uid in resource.data.get('candidateDriverIds', [])) ||
+        isAdmin()
+      );
+
+      // التحقق من السعر بقى بيتم هنا مباشرة (مجاني بالكامل) بدل الاعتماد على Cloud
+      // Function: كل صنف بيتقارن بسعره الحقيقي في /products، والإجمالي بيتحسب من
+      // القيم الحقيقية دي مش من اللي بعته المتصفح.
+      allow create: if isSignedIn() &&
+        request.resource.data.customerId == request.auth.uid &&
+        // جديد (Sprint 3، القرار 1): عميل محظور (status=='blocked') مايقدرش ينشئ طلب جديد،
+        // حتى لو قدر يوصل لشاشة الـ Checkout بأي طريقة تانية غير المسار الطبيعي.
+        !isCustomerBlocked() && customerProfileComplete() &&
+        // جديد (حماية رقم العميل - Option B): الرقم ممنوع يتخزن جوه الطلب لحظة الإنشاء خالص،
+        // بيتحط بس لحظة تعيين المندوب (راجع شرط driverId في allow update تحت).
+        !('customerPhone' in request.resource.data) &&
+        request.resource.data.keys().hasOnly(['customerId','customerName','storeId','storeName','items','total',
+          'commission','driverFee','pricingSnapshot','status','driverId','driverName','pickupLocation',
+          'customerLat','customerLng','storeLat','storeLng','distanceKm','statusHistory','createdAt']) &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.get('driverName', null) == null &&
+        request.resource.data.status == 'waiting_merchant' &&
+        request.resource.data.driverId == null &&
+        request.resource.data.storeId is string &&
+        orderStoreActiveOk(request.resource.data.storeId) &&
+        request.resource.data.items is list &&
+        request.resource.data.items.size() > 0 &&
+        request.resource.data.items.size() <= 12 &&
+        allItemsOk() &&
+        // جديد (P4.2 - Firestore Rules Security Audit): distanceKm ماكانتش عندها أي فحص نوع/قيمة
+        // خالص هنا وقت الإنشاء - driverFeeOk() فوق بيتجاهل أي قيمة مش رقم موجب فعليًا (effectiveDistance
+        // بترجع 0)، فمفيش تأثير مالي ممكن يحصل من قيمة تالفة، لكن كانت ممكن تتخزن قيمة عشوائية
+        // (نص، سالب، إلخ) في الوثيقة نفسها من غير أي رفض. الشرط ده بيقفل الفجوة دي بس - مش
+        // بيضيف أي حد أقصى جغرافي مُخترع (0 قرار عمل جديد، فحص نوع/إشارة بس): null لسه مسموحة
+        // بالكامل (فشل Routing المقصود)، وأي رقم لازم يكون موجب فعلاً لو موجود. نفس أسلوب فحص
+        // "الحقل موجود أصلاً؟" المستخدم في driverFeeOk() فوق بالحرف (('distanceKm' in ...) قبل
+        // أي .distanceKm مباشر) - الوصول المباشر لحقل غير موجود في map ممكن يسبب Evaluation Error
+        // في لغة الـ Rules بدل ما يرجع undefined/null بأمان.
+        // P18.2.1: orderDistanceKmOk() بديل الشرط القديم القابل للتجاوز - راجع الشرح فوق
+        // storeDistanceOk()/orderDistanceKmWithCoordsOk() لتفاصيل الإصلاح.
+        orderDistanceKmOk() &&
+        request.resource.data.total is number &&
+        request.resource.data.total == realOrderTotal() &&
+        request.resource.data.commission is number && request.resource.data.commission >= 0 &&
+        commissionOk() &&
+        request.resource.data.driverFee is number && request.resource.data.driverFee >= 0 &&
+        driverFeeOk();
+
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          // مندوب نشط بيقبل طلب searching_driver مفيهوش مندوب - بيعيّن نفسه وينقل الحالة
+          // لـ driver_assigned في نفس التحديث (زي acceptOrderAsDriver في orders.js تمامًا)
+          (
+            resource.data.driverId == null &&
+            request.resource.data.driverId == request.auth.uid &&
+            isOnlineActiveDriver() &&
+            request.auth.uid in resource.data.get('candidateDriverIds', []) &&
+            request.resource.data.driverName == realDriverName(request.auth.uid) &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('activeOrderId', null) == null &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('activeRideId', null) == null &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('activeExternalPurchaseId', null) == null &&
+            isValidOrderTransition(resource.data.status, request.resource.data.status) &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['driverId', 'driverName', 'driverPhone', 'customerPhone', 'status', 'statusHistory', 'updatedAt', 'acceptedAt']) &&
+            // customerPhone لازم يتساوي مع الرقم الحقيقي المخزّن في users/{customerId} - مش
+            // أي قيمة المندوب بعتها من المتصفح
+            (!('customerPhone' in request.resource.data.diff(resource.data).affectedKeys()) ||
+             request.resource.data.customerPhone == realCustomerPhone(resource.data.customerId)) &&
+            // driverPhone لازم يتساوي مع رقم المندوب الحقيقي المسجل - مش أي قيمة اتبعتت
+            (!('driverPhone' in request.resource.data.diff(resource.data).affectedKeys()) ||
+             request.resource.data.driverPhone == realDriverPhone(request.auth.uid))
+          ) ||
+          // جديد (P14.2 - Root Cause & Fix): المندوب المعيّن فعلاً على الطلب ده (driverId
+          // اتقفل بالفعل في فرع القبول فوق) بيقدر يحط رقم العميل الحقيقي في تحديث منفصل
+          // بعد التعيين مباشرة - راجع الخطوة 2 في acceptOrderAsDriver (orders.js). سبب
+          // الفصل: قراءة users/{customerId} من المتصفح (عشان المندوب يعرف الرقم أصلاً
+          // قبل ما يكتبه) بقت مسموحة بس بعد ما التعيين يتقفل فعليًا (راجع
+          // isMyActiveOrderCustomer في users/{userId} allow read فوق) - يعني وقت فرع
+          // القبول نفسه (فوق) لسه مفيش علاقة Verifiable، فمينفعش customerPhone يتكتب في
+          // نفس الخطوة. القيمة هنا برضه لازم تتساوي مع realCustomerPhone() الحقيقي بالظبط -
+          // صفر تغيير في منطق التحقق ده (نفس الدالة المستخدمة في فرع القبول فوق بالحرف).
+          (
+            resource.data.driverId == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerPhone', 'updatedAt']) &&
+            request.resource.data.customerPhone == realCustomerPhone(resource.data.customerId)
+          ) ||
+          // المندوب المعيّن بيقدّم حالة التوصيل خطوة بخطوة بس (وصل/استلم/في الطريق/سلّم)
+          (
+            resource.data.driverId == request.auth.uid &&
+            isValidOrderTransition(resource.data.status, request.resource.data.status) &&
+            request.resource.data.status in ['driver_arrived','picked_up','on_the_way','delivered','delivering','done'] &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'statusHistory', 'updatedAt'])
+          ) ||
+          // التاجر بيرد على طلب متجره بس (قبول ← بحث عن مندوب / رفض)، بخطوة واحدة صحيحة
+          // في كل تحديث (مش ينط من waiting_merchant لـ searching_driver دفعة واحدة)
+          (
+            resource.data.storeId == request.auth.uid && isApprovedMerchant() &&
+            isValidOrderTransition(resource.data.status, request.resource.data.status) &&
+            request.resource.data.status in ['merchant_accepted','merchant_rejected','searching_driver','cancelled','accepted','preparing','ready'] &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'statusHistory', 'updatedAt'])
+          ) ||
+          // جديد (Baseline Recovery - Customer Cancellation): العميل يقدر يلغي طلبه بنفسه، بس
+          // لحد ما يتعيّن مندوب فعليًا (driver_assigned) - بعد كده (driver_arrived فأعلى)
+          // مينفعش يلغي (المندوب يكون خرج بالفعل)، زي ما هو الحال بالظبط للتاجر. القائمة تحت
+          // بتحدد الحالات المسموحة صراحة (مش بالاعتماد على isValidOrderTransition لوحدها، لأنها
+          // كانت هتسمح بالإلغاء لحد driver_arrived برضه وده أوسع من المطلوب هنا).
+          (
+            resource.data.customerId == request.auth.uid &&
+            resource.data.status in ['waiting_merchant','merchant_accepted','searching_driver','driver_assigned','new','accepted','preparing'] &&
+            request.resource.data.status == 'cancelled' &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'statusHistory', 'updatedAt', 'cancelReason'])
+          ) ||
+          // جديد (Delivery Tracking Hardening - P7): تحديث موقع المندوب الحي (driverLocation
+          // بس) - راجع orderDriverLocationUpdateOk() فوق مع باقي الـ Functions لكل التفاصيل.
+          orderDriverLocationUpdateOk()
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ===== RATINGS ===== (زي ما هي)
+    match /ratings/{ratingId} {
+      // AUDIT-2026 (P0 Duplicate Ratings): معرّف ثابت = orderId_customerId_targetType. إنشاء مستند
+      // موجود = update وده ممنوع لغير الأدمن => تقييم واحد فقط لكل (طلب، عميل، نوع هدف).
+      allow create: if isSignedIn() &&
+        request.resource.data.keys().hasOnly(['orderId','customerId','targetId','targetType','stars','comment','createdAt']) &&
+        request.resource.data.customerId == request.auth.uid &&
+        request.resource.data.orderId is string &&
+        ratingId == request.resource.data.orderId + '_' + request.auth.uid + '_' + request.resource.data.targetType &&
+        request.resource.data.createdAt == request.time &&
+        (!('comment' in request.resource.data) || (request.resource.data.comment is string && request.resource.data.comment.size() <= 500)) &&
+        request.resource.data.targetType in ['store', 'driver'] &&
+        request.resource.data.stars is int && request.resource.data.stars >= 1 && request.resource.data.stars <= 5 &&
+        ratingOrderValid(request.resource.data.orderId, request.resource.data.targetType, request.resource.data.targetId);
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.targetId == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    // ===== COUNTERS (أرقام تسلسلية زي D1001, D1002...) =====
+    // أي مستخدم مسجل دخول يقدر يزوّد العداد بواحد بالظبط، مينفعش يقفز أرقام أو يرجع لورا
+    match /counters/{counterId} {
+      allow read: if isSignedIn();
+      // P18.1 (Goal D): 'driverRequests' هو العداد الوحيد اللي فعليًا بيتستخدم في المشروع كله
+      // (js/merchant.js:getNextRequestId، النداء الوحيد ليها في js/driver.js:submitDrvReg وقت
+      // تسجيل كابتن جديد) - قبل كده أي مستخدم مسجّل كان يقدر ينشئ/يزوّد أي counterId عشوائي.
+      // isSignedIn() بس (مش isActiveDriver()) لأن النداء ده بيحصل أثناء التسجيل نفسه، قبل ما
+      // يبقى عند المستخدم role=='driver' أو status=='active' أصلًا.
+      // AUDIT-2026: الزيادة لازم تحصل في نفس Transaction مع كتابة users/{uid}.requestId = 'D'+seq
+      // (getAfter) ومرة واحدة لكل مندوب (لسه معندوش requestId) => مفيش حرق IDs بالجملة.
+      allow create: if isSignedIn() && counterId == 'driverRequests' && request.resource.data.seq == 1001 &&
+        request.resource.data.keys().hasOnly(['seq']) &&
+        !('requestId' in userDocOf(request.auth.uid)) &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('requestId', '') == 'D' + string(request.resource.data.seq);
+      allow update: if isSignedIn() && counterId == 'driverRequests' &&
+        request.resource.data.seq == resource.data.seq + 1 &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seq']) &&
+        !('requestId' in userDocOf(request.auth.uid)) &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('requestId', '') == 'D' + string(request.resource.data.seq);
+      allow delete: if isAdmin();
+    }
+
+    // ===== CATEGORIES / BANNERS / COUPONS (Admin content) ===== (زي ما هي)
+    match /categories/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /banners/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /coupons/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ===== PUBLIC FORMS ===== (زي ما هي)
+    match /merchant_requests/{id} {
+      allow create: if request.resource.data.keys().hasOnly(['storeName','phone','address','status','createdAt']) &&
+        request.resource.data.storeName is string && request.resource.data.storeName.size() > 0 && request.resource.data.storeName.size() <= 200 &&
+        request.resource.data.phone is string && request.resource.data.phone.size() > 0 && request.resource.data.phone.size() <= 30 &&
+        request.resource.data.address is string && request.resource.data.address.size() <= 300 &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.createdAt == request.time;
+      allow read, update, delete: if isAdmin();
+    }
+    match /any_requests/{id} {
+      // P18.1 (Goal A): create لسه متاح لمستخدم غير مسجّل عمدًا (js/customer.js بيستخدم
+      // customerId:'guest' فعليًا كتصميم مقصود لخدمة "اطلب أي حاجة" - مفيش داعي نضيف تسجيل
+      // دخول إجباري من عندنا هنا). اللي اتقفل هنا: أي حقل عشوائي، أي status غير 'new'، وأي
+      // طول نص غير معقول (Spam payload). حماية Rate-Limiting حقيقية ضد anonymous abuse محتاجة
+      // Backend موثوق (Deferred - راجع تقرير P18.1) - الـ Rules وحدها مش قادرة تعمل حماية
+      // Stateful زي دي.
+      allow create: if
+        request.resource.data.keys().hasOnly(['customerId','customerName','request','address','status','createdAt']) &&
+        request.resource.data.status == 'new' &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.customerId is string &&
+        (isSignedIn() ? request.resource.data.customerId == request.auth.uid : request.resource.data.customerId == 'guest') &&
+        request.resource.data.customerName is string && request.resource.data.customerName.size() <= 100 &&
+        request.resource.data.request is string && request.resource.data.request.size() > 0 && request.resource.data.request.size() <= 500 &&
+        request.resource.data.address is string && request.resource.data.address.size() <= 300;
+      allow read, update, delete: if isAdmin();
+    }
+
+    // ===== NOTIFICATIONS ===== (معدّلة - جديد)
+    // كانت allow create مقصورة على isAdmin() بس، فكانت تسيب createNotification() (نقطة
+    // الإنشاء المركزية لأحداث الطلب) بترفض دايمًا لأي حدث مش من الأدمن. دلوقتي أي مستخدم
+    // مسجل يقدر ينشئ إشعار بس لو هو نفسه طرف فعلي في الطلب المرتبط، والمستلم كمان طرف فعلي
+    // في نفس الطلب (Least Privilege - مينفعش حد يبعت إشعار لمستخدم عشوائي).
+    // ===== NOTIFICATIONS (AUDIT-2026: entityType/entityId) =====
+    // Schema الجديد: userId(recipient), title, body, type, entityType in [order|ride|external_purchase],
+    // entityId, eventKey, read, createdAt (+ orderId للتوافق مع القديم لما entityType=='order').
+    // Legacy: مستندات/كتابات بدون entityType = طلب توصيل (orderId) - لسه شغالة بالقواعد القديمة (eventKey + محتوى).
+    function entityData(entityType, entityId) {
+      return entityType == 'order' ? get(/databases/$(database)/documents/orders/$(entityId)).data
+           : entityType == 'ride' ? get(/databases/$(database)/documents/rides/$(entityId)).data
+           : get(/databases/$(database)/documents/external_purchases/$(entityId)).data;
+    }
+    function isEntityParty(entityType, entityId, uid) {
+      let e = entityData(entityType, entityId);
+      return e.get('customerId', '') == uid || e.get('driverId', '') == uid || e.get('storeId', '') == uid;
+    }
+    function legacyOrderNotifOk() {
+      return request.resource.data.keys().hasOnly(['userId','title','body','type','orderId','read','createdAt','eventKey']) &&
+        request.resource.data.read == false &&
+        request.resource.data.userId is string &&
+        request.resource.data.orderId is string &&
+        isOrderParty(request.resource.data.orderId, request.auth.uid) &&
+        isOrderParty(request.resource.data.orderId, request.resource.data.userId) &&
+        (!('eventKey' in request.resource.data) ||
+         (eventKeyMatchesOrderStatus(request.resource.data.orderId, request.resource.data.eventKey) &&
+          eventKeyAllowedContent(request.resource.data.eventKey, request.resource.data.title, request.resource.data.body)));
+    }
+    function entityNotifOk() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['userId','title','body','type','entityType','entityId','orderId','eventKey','read','createdAt']) &&
+        d.read == false &&
+        d.createdAt == request.time &&
+        d.userId is string &&
+        d.entityType in ['order', 'ride', 'external_purchase'] &&
+        d.entityId is string && d.entityId.size() > 0 && d.entityId.size() <= 128 &&
+        d.title is string && d.title.size() > 0 && d.title.size() <= 100 &&
+        d.body is string && d.body.size() <= 300 &&
+        d.type is string && d.type.size() <= 10 &&
+        d.eventKey is string &&
+        (d.entityType != 'order' || d.get('orderId', d.entityId) == d.entityId) &&
+        isEntityParty(d.entityType, d.entityId, request.auth.uid) &&
+        isEntityParty(d.entityType, d.entityId, d.userId) &&
+        // الحدث لازم يطابق الحالة الحالية فعليًا (منع Pre-emption) - ride/external: eventKey == status.
+        // order: نفس الخريطة + المحتوى المسموح القديم.
+        (d.entityType == 'order'
+          ? (eventKeyMatchesOrderStatus(d.entityId, d.eventKey) && eventKeyAllowedContent(d.eventKey, d.title, d.body))
+          : entityData(d.entityType, d.entityId).status == d.eventKey);
+    }
+    match /notifications/{id} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isAdmin() || (
+        isSignedIn() &&
+        (('entityType' in request.resource.data) ? entityNotifOk() : legacyOrderNotifOk())
+      );
+      allow update: if isAdmin() || (
+        isSignedIn() && resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /auditLog/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ===== RIDES (Phase 2: بنية + Phase 3A: create + Phase 3B: update عبر 3 مسارات محكومة) =====
+    // update بقت مفتوحة بس من خلال customerDispatchOk/driverAcceptOk/driverRejectOk (فوق) - كل
+    // مسار بيتحقق من الهوية والحالة الحالية، وrideCoreUnchanged() بيمنع أي تعديل على بيانات
+    // الطلب أو السعر مهما كان المسار. delete لسه مقفولة بالكامل.
+    match /rides/{rideId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.customerId == request.auth.uid) ||
+        (isSignedIn() && resource.data.driverId == request.auth.uid) ||
+        (isSignedIn() && resource.data.candidateDriverIds is list && request.auth.uid in resource.data.candidateDriverIds);
+      allow create: if isSignedIn() &&
+        request.resource.data.customerId == request.auth.uid &&
+        !isCustomerBlocked() && customerProfileComplete() &&
+        request.resource.data.status == 'requested' &&
+        request.resource.data.vehicleType in ['motorcycle', 'tuktuk', 'car'] &&
+        request.resource.data.pickup is map && request.resource.data.dropoff is map &&
+        request.resource.data.pickup.lat is number && request.resource.data.pickup.lng is number &&
+        request.resource.data.dropoff.lat is number && request.resource.data.dropoff.lng is number &&
+        request.resource.data.distanceKm is number && request.resource.data.distanceKm > 0 &&
+        // P18.2 / P18.2.1: pickup/dropoff إلزاميين بالفعل (مفيش OR-bypass زي orders كان عنده) -
+        // مفيش "موقع متجر ثابت موثوق" مكافئ للمشاوير (الانطلاق/الوصول قرار العميل شرعًا، مش
+        // عنوان مسجّل زي المتجر) فـ Finding B لا ينطبق هنا.
+        distanceKmPlausible(request.resource.data.distanceKm,
+          request.resource.data.pickup.lat, request.resource.data.pickup.lng,
+          request.resource.data.dropoff.lat, request.resource.data.dropoff.lng) &&
+        request.resource.data.driverId == null &&
+        request.resource.data.get('candidateDriverIds', []) == [] &&
+        request.resource.data.get('rejectedDriverIds', []) == [] &&
+        request.resource.data.get('dispatchLog', []) == [] &&
+        request.resource.data.keys().hasOnly(['customerId','pickup','dropoff','vehicleType','status','driverId',
+          'distanceKm','tripEtaMinutes','routeGeometry','routingProvider','pricingSnapshot','createdAt',
+          'candidateDriverIds','rejectedDriverIds','dispatchLog']) &&
+        request.resource.data.createdAt == request.time &&
+        (!('routeGeometry' in request.resource.data) || (request.resource.data.routeGeometry is string && request.resource.data.routeGeometry.size() <= 60000)) &&
+        rideDistanceOk() &&
+        rideFareOk();
+      // ===== UPDATE - Phase 3B (3 مسارات) + Phase 4B (مسارين إضافيين: استكمال الـ Lifecycle
+      // + تحديث موقع المندوب الحي) - كل المسارات معرّفة فوق مع باقي الـ Functions =====
+      allow update: if isAdmin() || customerDispatchOk() || driverAcceptOk() || driverRejectOk() ||
+        driverLifecycleOk() || driverLocationUpdateOk();
+      allow delete: if false;
+    }
+
+    // ===== EXTERNAL PURCHASE SERVICE (Phase 3B) — "لديك طلب؟ اطلبه" =====
+    // Collection مستقل بالكامل (external_purchases) - القرار المعتمد في MOVA Phase 3 Architecture
+    // Review: مش Merchant Order ومش Ride، صفر مشاركة مع orders/rides. نفس فلسفة rideCoreUnchanged/
+    // customerDispatchOk/driverAcceptOk/driverRejectOk/driverLifecycleOk بالحرف، لكن بأسماء
+    // ومسارات lifecycle خاصة بالخدمة دي (بما فيهم item_unavailable/budget_exceeded الجديدتين).
+    // ===== EXTERNAL PURCHASES (AUDIT-2026: canonical schema + integrity) =====
+    // Canonical schema (يطابق js/external.js:sendExternalPurchase بالحرف):
+    //   customerId, customerName, driverId(null), candidateDriverIds([]), rejectedDriverIds([]), dispatchLog([]),
+    //   placeName, placeAddress, items(string), notes, approxBudget(number>=0),
+    //   pickupLocation{latitude,longitude,address,city,zone}, additionalNotes(string<=500),
+    //   actualProductPrice(null), paymentResponsibility, pricingSnapshot, status, createdAt, updatedAt
+    // deliveryAddress/deliveryLocation = Legacy (قراءة فقط لمستندات قديمة، ممنوعة في الإنشاء الجديد).
+    // epCoreUnchanged الجديدة بتعتمد على affectedKeys (بدل مقارنة حقول قد تكون غير موجودة في المستندات
+    // القديمة وتعمل Error => رفض كل التحديثات) وبتضيف pickupLocation/additionalNotes/customerName/notes.
+    function epCoreUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'customerId', 'customerName', 'placeName', 'placeAddress', 'items', 'notes', 'approxBudget',
+        'pickupLocation', 'additionalNotes', 'deliveryAddress', 'deliveryLocation',
+        'pricingSnapshot', 'paymentResponsibility', 'createdAt'
+      ]);
+    }
+    function externalRate() {
+      return get(/databases/$(database)/documents/settings/commission).data.get('externalRate', 10);
+    }
+    function epFareOk() {
+      let expected = expectedFare('external_purchase', 0);
+      let snap = request.resource.data.pricingSnapshot;
+      return snap is map &&
+             snap.finalFare is number &&
+             snap.finalFare >= expected - 1 && snap.finalFare <= expected + 1 &&
+             snap.serviceType == 'external_purchase' &&
+             snap.pricingVersion == pricingConfig().pricingVersion &&
+             snap.commissionRate == externalRate() &&
+             snap.commission is number &&
+             snap.commission >= snap.finalFare * externalRate() / 100 - 1 &&
+             snap.commission <= snap.finalFare * externalRate() / 100 + 1;
+    }
+    function epLocationOk() {
+      let l = request.resource.data.pickupLocation;
+      return l is map &&
+             l.keys().hasOnly(['latitude', 'longitude', 'address', 'city', 'zone']) &&
+             l.latitude is number && l.latitude >= -90 && l.latitude <= 90 &&
+             l.longitude is number && l.longitude >= -180 && l.longitude <= 180 &&
+             (l.get('address', null) == null || (l.address is string && l.address.size() <= 300)) &&
+             (l.get('city', null) == null || (l.city is string && l.city.size() <= 100)) &&
+             (l.get('zone', null) == null || (l.zone is string && l.zone.size() <= 100));
+    }
+    function epCustomerDispatchOk() {
+      return resource.data.customerId == request.auth.uid &&
+             resource.data.status == 'requested' &&
+             request.resource.data.status == 'driver_offered' &&
+             request.resource.data.driverId == null &&
+             candidatesEligible(request.resource.data.candidateDriverIds) &&
+             !(request.auth.uid in request.resource.data.candidateDriverIds) &&
+             request.resource.data.rejectedDriverIds.size() == 0 &&
+             request.resource.data.dispatchLog.size() <= 20 &&
+             request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'candidateDriverIds', 'rejectedDriverIds', 'offeredAt', 'updatedAt', 'dispatchLog']) &&
+             epCoreUnchanged();
+    }
+    function epDriverAcceptOk() {
+      let drv = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return isActiveDriver() &&
+             drv.get('activeRideId', null) == null && drv.get('activeOrderId', null) == null && drv.get('activeExternalPurchaseId', null) == null &&
+             resource.data.status == 'driver_offered' &&
+             resource.data.driverId == null &&
+             request.auth.uid in resource.data.candidateDriverIds &&
+             request.resource.data.status == 'driver_assigned' &&
+             request.resource.data.driverId == request.auth.uid &&
+             request.resource.data.candidateDriverIds == resource.data.candidateDriverIds &&
+             request.resource.data.rejectedDriverIds == resource.data.get('rejectedDriverIds', []) &&
+             request.resource.data.dispatchLog.size() <= 20 &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['driverId', 'status', 'dispatchLog', 'customerPhone', 'updatedAt']) &&
+             (!('customerPhone' in request.resource.data.diff(resource.data).affectedKeys()) ||
+              request.resource.data.customerPhone == realCustomerPhone(resource.data.customerId)) &&
+             epCoreUnchanged();
+    }
+    function epDriverRejectOk() {
+      let oldRejected = resource.data.get('rejectedDriverIds', []);
+      let properAppend = oldRejected.concat([request.auth.uid]);
+      return isActiveDriver() &&
+             resource.data.status == 'driver_offered' &&
+             request.auth.uid in resource.data.candidateDriverIds &&
+             !(request.auth.uid in oldRejected) &&
+             request.resource.data.driverId == resource.data.driverId &&
+             request.resource.data.dispatchLog.size() <= 20 &&
+             request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'candidateDriverIds', 'rejectedDriverIds', 'dispatchLog', 'updatedAt']) &&
+             (
+               (request.resource.data.status == 'driver_offered' &&
+                request.resource.data.candidateDriverIds == resource.data.candidateDriverIds &&
+                request.resource.data.rejectedDriverIds == properAppend)
+               ||
+               (request.resource.data.status == 'requested' &&
+                properAppend.size() == resource.data.candidateDriverIds.size() &&
+                request.resource.data.candidateDriverIds.size() == 0 &&
+                request.resource.data.rejectedDriverIds.size() == 0)
+             ) &&
+             epCoreUnchanged();
+    }
+    function isValidEpLifecycleTransition(from, to) {
+      return (from == 'driver_assigned' && to == 'shopping') ||
+             (from == 'shopping' && to == 'item_unavailable') ||
+             (from == 'shopping' && to == 'budget_exceeded') ||
+             (from == 'shopping' && to == 'purchased') ||
+             (from == 'purchased' && to == 'delivering') ||
+             (from == 'delivering' && to == 'completed');
+    }
+    function epDriverLifecycleOk() {
+      let st = request.resource.data.status;
+      let withPrice = (st == 'budget_exceeded' || st == 'purchased');
+      return isSignedIn() && resource.data.driverId == request.auth.uid &&
+             isValidEpLifecycleTransition(resource.data.status, st) &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+               withPrice ? ['status', 'actualProductPrice', 'updatedAt'] : ['status', 'updatedAt']
+             ) &&
+             (!withPrice || (request.resource.data.actualProductPrice is number &&
+                             request.resource.data.actualProductPrice > 0 &&
+                             request.resource.data.actualProductPrice <= 100000)) &&
+             (st != 'purchased' ||
+              resource.data.approxBudget <= 0 ||
+              request.resource.data.actualProductPrice <= resource.data.approxBudget) &&
+             epCoreUnchanged();
+    }
+    function epCustomerDecisionOk() {
+      return resource.data.customerId == request.auth.uid &&
+             (
+               (resource.data.status == 'item_unavailable' && request.resource.data.status in ['shopping', 'cancelled']) ||
+               (resource.data.status == 'budget_exceeded' && request.resource.data.status in ['purchased', 'cancelled'])
+             ) &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+             epCoreUnchanged();
+    }
+    function epCustomerCancelOk() {
+      return resource.data.customerId == request.auth.uid &&
+             resource.data.status in ['requested', 'driver_offered', 'driver_assigned'] &&
+             request.resource.data.status == 'cancelled' &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+             epCoreUnchanged();
+    }
+
+    match /external_purchases/{purchaseId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.customerId == request.auth.uid) ||
+        (isSignedIn() && resource.data.driverId == request.auth.uid) ||
+        (isSignedIn() && resource.data.driverId == null && resource.data.candidateDriverIds is list && request.auth.uid in resource.data.candidateDriverIds);
+      allow create: if isSignedIn() &&
+        request.resource.data.keys().hasOnly(['customerId','customerName','driverId','candidateDriverIds','rejectedDriverIds',
+          'dispatchLog','placeName','placeAddress','items','notes','approxBudget','pickupLocation','additionalNotes',
+          'actualProductPrice','paymentResponsibility','pricingSnapshot','status','createdAt','updatedAt']) &&
+        request.resource.data.customerId == request.auth.uid &&
+        !isCustomerBlocked() && customerProfileComplete() &&
+        request.resource.data.status == 'requested' &&
+        request.resource.data.driverId == null &&
+        request.resource.data.candidateDriverIds == [] &&
+        request.resource.data.rejectedDriverIds == [] &&
+        request.resource.data.dispatchLog == [] &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.customerName is string && request.resource.data.customerName.size() <= 100 &&
+        request.resource.data.placeName is string && request.resource.data.placeName.size() > 0 && request.resource.data.placeName.size() <= 200 &&
+        request.resource.data.placeAddress is string && request.resource.data.placeAddress.size() <= 300 &&
+        request.resource.data.items is string && request.resource.data.items.size() > 0 && request.resource.data.items.size() <= 1000 &&
+        request.resource.data.notes is string && request.resource.data.notes.size() <= 500 &&
+        request.resource.data.additionalNotes is string && request.resource.data.additionalNotes.size() <= 500 &&
+        request.resource.data.approxBudget is number && request.resource.data.approxBudget >= 0 && request.resource.data.approxBudget <= 100000 &&
+        epLocationOk() &&
+        request.resource.data.paymentResponsibility == 'captain_advances_cash' &&
+        request.resource.data.actualProductPrice == null &&
+        epFareOk();
+      allow update: if isAdmin() || epCustomerDispatchOk() || epDriverAcceptOk() || epDriverRejectOk() ||
+        epDriverLifecycleOk() || epCustomerDecisionOk() || epCustomerCancelOk();
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

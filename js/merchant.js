@@ -158,7 +158,11 @@ export async function merchAcceptOrd(id) {
     const actor = { type: 'merchant', uid: window.CU?.uid, name: window.CUD?.storeName || window.CUD?.name };
     await merchantRespond(id, true, actor);
     showToast('تم قبول الطلب، جاري البحث عن كابتن','ok');
-  } catch(e) { showToast(e?.message==='invalid-transition' ? 'تم اتخاذ إجراء على هذا الطلب بالفعل' : 'حدث خطأ','err'); }
+  } catch(e) {
+    showToast(e?.message==='invalid-transition' ? 'تم اتخاذ إجراء على هذا الطلب بالفعل'
+      : e?.message==='search-start-failed' ? 'تم قبول الطلب وسيبدأ البحث عن كابتن تلقائيًا خلال دقيقة'
+      : 'حدث خطأ','err');
+  }
 }
 export async function merchRejectOrd(id) {
   try {
