@@ -1,12 +1,12 @@
 // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
 
-import { auth, createUserWithEmailAndPassword, db, doc, EmailAuthProvider, fetchSignInMethodsForEmail, getDoc, gProvider, linkWithCredential, linkWithRedirect, runTransaction, sendPasswordResetEmail, sendSignInLinkToEmail, serverTimestamp, setDoc, signInWithEmailAndPassword, signInWithRedirect, signOut, updateDoc } from './firebase.js';
+import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithRedirect, signOut, updateDoc } from './firebase.js';
 import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
 import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
 
 export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // UI hint فقط (sessionStorage) - مش مصدر صلاحيات
 export function takeEntryType() { try { const t = sessionStorage.getItem(ENTRY_TYPE_KEY); sessionStorage.removeItem(ENTRY_TYPE_KEY); return ['customer','driver','merchant'].includes(t) ? t : null; } catch(e) { return null; } }
-import { clearAllListeners, setLoad, showErr, showScreen, showToast } from './utils.js';
+import { clearAllListeners, setLoad, showScreen, showToast } from './utils.js';
 import { getLocation, loadDriverData, startGPS } from './driver.js';
 import { loadAdminData } from './admin.js';
 import { startNotifListener } from './notifications.js';
@@ -20,23 +20,21 @@ import { listenRideOffers, initDriverActiveRideListener } from './rides.js';
 // نقطة واحدة لترجمة أكواد أخطاء Firebase Auth لرسائل عربية واضحة - بدل ما كل دالة تفسّر
 // الأكواد بمنطقها الخاص. أي دالة Auth جديدة مستقبلًا تستخدم هذه الدالة بدل تكرار المنطق.
 export function firebaseAuthErrorMessage(e) {
+  // رسائل عربية مفهومة للمستخدم - بدون أكواد Firebase.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'لا يوجد اتصال بالإنترنت. تأكد من الشبكة وحاول مرة أخرى.';
   const code = e?.code || '';
   const map = {
-    'auth/user-not-found': 'البريد أو كلمة المرور غير صحيحة',
-    'auth/wrong-password': 'البريد أو كلمة المرور غير صحيحة',
-    'auth/invalid-credential': 'البريد أو كلمة المرور غير صحيحة',
-    'auth/invalid-email': 'صيغة البريد الإلكتروني غير صحيحة',
-    'auth/email-already-in-use': 'البريد مسجل بالفعل — سجّل دخولك بدل إنشاء حساب جديد',
-    'auth/weak-password': 'كلمة المرور ضعيفة، اختر كلمة مرور أقوى (6 أحرف على الأقل)',
-    'auth/too-many-requests': 'محاولات كتير متتالية، حاول تاني بعد شوية',
-    'auth/network-request-failed': 'مشكلة في الاتصال بالإنترنت، حاول تاني',
-    'auth/unauthorized-domain': 'الدومين غير مصرح في إعدادات Firebase',
-    'auth/popup-closed-by-user': 'تم إغلاق نافذة تسجيل الدخول',
-    'auth/credential-already-in-use': 'هذا الحساب مربوط بمستخدم آخر بالفعل',
-    'auth/provider-already-linked': 'الحساب ده مربوط بالفعل',
-    'auth/requires-recent-login': 'يرجى تسجيل الدخول مرة أخرى لإتمام هذه العملية',
+    'auth/network-request-failed': 'تعذّر الاتصال بالإنترنت. تأكد من الشبكة وحاول مرة أخرى.',
+    'auth/unauthorized-domain': 'تعذّر تسجيل الدخول من هذا الرابط حاليًا. تواصل مع الدعم.',
+    'auth/popup-closed-by-user': 'تم إلغاء تسجيل الدخول. اضغط "المتابعة باستخدام Google" للمحاولة مرة أخرى.',
+    'auth/cancelled-popup-request': 'تم إلغاء تسجيل الدخول. اضغط "المتابعة باستخدام Google" للمحاولة مرة أخرى.',
+    'auth/too-many-requests': 'محاولات كثيرة متتالية. انتظر قليلًا ثم حاول مرة أخرى.',
+    'auth/user-disabled': 'هذا الحساب موقوف. تواصل مع الإدارة.',
+    'auth/operation-not-allowed': 'تسجيل الدخول بـ Google غير متاح مؤقتًا. حاول لاحقًا.',
+    'auth/web-storage-unsupported': 'متصفحك يمنع حفظ بيانات الدخول. فعّل التخزين أو جرّب متصفحًا آخر.',
+    'auth/account-exists-with-different-credential': 'هذا البريد مسجّل بطريقة دخول قديمة لم تعد مدعومة. تواصل مع الإدارة لمساعدتك.',
   };
-  return map[code] || 'حدث خطأ، حاول مرة أخرى';
+  return map[code] || 'حدث خطأ غير متوقع. حاول مرة أخرى.';
 }
 
 // ===== Phase 2: Prevent Double Authentication =====
@@ -50,14 +48,20 @@ function authLockStart() {
 }
 function authLockEnd() { _authOpInProgress = false; }
 
-// ===== Phase 2: Secure Account Linking — التخزين المؤقت لنية الربط =====
-// بيتخزن بس لحظة اكتشاف تعارض Provider حقيقي (auth/account-exists-with-different-credential
-// أو auth/email-already-in-use)، وبيتمسح فورًا بعد أول استخدام أو محاولة - مفيش أي Auto Linking،
-// الربط الفعلي بيحصل بس بعد ما المستخدم يثبت ملكية الحساب الأصلي بتسجيل دخول ناجح بيه.
-const LINK_INTENT_KEY = 'mova_link_intent';
-function stashLinkIntent(intent) { try { sessionStorage.setItem(LINK_INTENT_KEY, JSON.stringify(intent)); } catch(e) {} }
-function readLinkIntent() { try { const raw = sessionStorage.getItem(LINK_INTENT_KEY); return raw ? JSON.parse(raw) : null; } catch(e) { return null; } }
-function clearLinkIntent() { try { sessionStorage.removeItem(LINK_INTENT_KEY); } catch(e) {} }
+// ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
+const GOOGLE_LABEL = 'المتابعة باستخدام Google';
+function setLoginBusy(on) {
+  const b = document.getElementById('lg-google'); if (!b) return;
+  b.classList.toggle('is-loading', on); b.disabled = on; b.setAttribute('aria-busy', on ? 'true' : 'false');
+  const l = document.getElementById('lg-google-label'); if (l) l.textContent = on ? 'جاري التحويل إلى Google…' : GOOGLE_LABEL;
+}
+export function showLoginError(msg) {
+  const e = document.getElementById('err-msg'); if (!e) return;
+  e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none';
+}
+// الرجوع للصفحة بزر Back بعد تحويل Google (bfcache) لازم يفك الزر والقفل
+window.addEventListener('pageshow', (ev) => { if (ev.persisted) { setLoginBusy(false); authLockEnd(); } });
+
 
 export function hideLoading() {
   const ld = document.getElementById('loading');
@@ -65,77 +69,34 @@ export function hideLoading() {
   setTimeout(() => ld.style.display = 'none', 500);
 }
 
-export function switchTab(t) {
-  // MATLABK: لوحة Google/الدخول دايمًا ظاهرة (التسجيل الجديد بـ Google فقط)
-  document.getElementById('auth-login').style.display = 'block';
-  document.getElementById('err-msg').style.display = 'none';
-  updateEntryLabel(t);
-}
 
-export const ENTRY_LABELS = {customer:{icon:'👤',name:'عميل'},driver:{icon:'🛵',name:'كابتن'},merchant:{icon:'🏪',name:'تاجر'},admin:{icon:'⚙️',name:'إدارة'}};
-export function updateEntryLabel(tab) {
-  const cfg = ENTRY_LABELS[window.selectedType] || ENTRY_LABELS.customer;
-  document.getElementById('entry-type-icon').textContent = cfg.icon;
-  document.getElementById('entry-type-label').textContent = `Continue with Google — ${cfg.name}`;
-}
-
+const ENTRY_MODES = {
+  driver: 'التسجيل ككابتن توصيل — طلبك يُراجَع من الإدارة قبل التفعيل',
+  merchant: 'التسجيل كتاجر — طلبك يُراجَع من الإدارة قبل التفعيل',
+};
+// نوع الحساب = تلميح UI فقط لمستخدم Google الجديد (العميل هو الافتراضي). الصلاحيات الفعلية في Firestore Rules.
 export function pickEntryType(type) {
-  window.selectedType = type;
-  ['customer','merchant','driver','admin'].forEach(t => {
-    const el = document.getElementById('reg-'+t+'-fields');
-    if (el) el.style.display = t === type ? 'block' : 'none';
-  });
-  switchTab('register');
-  showScreen('screen-auth');
-}
-
-export async function showEmailOTP() {
-  const emailInput = document.getElementById('lmail');
-  const email = emailInput?.value?.trim() || '';
-  const finalEmail = email || prompt('أدخل بريدك الإلكتروني:');
-  if (!finalEmail) return;
-  try {
-    await sendSignInLinkToEmail(auth, finalEmail, {
-      url: window.location.origin + window.location.pathname,
-      handleCodeInApp: true,
-    });
-    window.localStorage?.setItem('emailForSignIn', finalEmail);
-    document.getElementById('otp-email').textContent = finalEmail;
-    showScreen('screen-otp');
-    showToast('✅ تم إرسال رابط التحقق على بريدك','ok');
-  } catch(e) { showToast(firebaseAuthErrorMessage(e),'err'); }
+  window.selectedType = type === 'driver' || type === 'merchant' ? type : 'customer';
+  const mode = ENTRY_MODES[window.selectedType];
+  const box = document.getElementById('lg-mode'), txt = document.getElementById('lg-mode-text'), join = document.getElementById('lg-join');
+  if (box) box.hidden = !mode; if (txt) txt.textContent = mode || ''; if (join) join.hidden = !!mode;
+  showLoginError('');
 }
 
 export async function loginGoogle() {
-  if (!authLockStart()) { showToast('في عملية تسجيل دخول شغالة بالفعل، استنى شوية','inf'); return; }
+  if (!authLockStart()) return; // منع الضغط المتكرر أثناء التحويل
+  showLoginError('');
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(firebaseAuthErrorMessage({})); authLockEnd(); return; }
+  setLoginBusy(true);
+  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); } catch(e) {}
   try {
-    showToast('جاري تسجيل الدخول بـ Google...','inf');
-    try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); } catch(e) {}
-    await signInWithRedirect(auth, gProvider);
+    await signInWithRedirect(auth, gProvider); // الصفحة بتتحوّل لـ Google؛ القفل بيفضل لحد الرجوع
   } catch(e) {
-    showToast(firebaseAuthErrorMessage(e),'err');
-    authLockEnd();
+    setLoginBusy(false); showLoginError(firebaseAuthErrorMessage(e)); authLockEnd();
   }
-  // ملحوظة: الـ Lock بيفضل مقفول عمدًا هنا في حالة النجاح - الصفحة هتعمل Redirect كامل بره
-  // التطبيق، فمفيش داعي نفكه (الصفحة هترجع تحمّل من جديد أصلًا، والـ Lock هيتصفّر تلقائيًا).
 }
 
-export async function doLogin() {
-  if (!authLockStart()) { showToast('في عملية تسجيل دخول شغالة بالفعل، استنى شوية','inf'); return; }
-  const email = document.getElementById('lmail').value.trim();
-  const pass = document.getElementById('lpass').value;
-  if (!email || !pass) { showErr('يرجى تعبئة جميع الحقول'); authLockEnd(); return; }
-  setLoad('login-btn','lsp',true);
-  try {
-    await signInWithEmailAndPassword(auth, email, pass);
-    showToast('أهلاً بك! 👋','ok');
-  } catch(e) {
-    showErr(firebaseAuthErrorMessage(e));
-  } finally { setLoad('login-btn','lsp',false); authLockEnd(); }
-}
 
-// MATLABK: التسجيل الجديد بـ Google فقط (بدون إيميل/باسورد). الدالة محفوظة لأن main.js/HTML القديم بيستوردها.
-export async function doRegister() { return loginGoogle(); }
 
 export async function doLogout() {
   if (window._gpsWatch) navigator.geolocation.clearWatch(window._gpsWatch);
@@ -145,103 +106,23 @@ export async function doLogout() {
   // من قبل)، وده بيتغلب على أي تبديل بـ class.active اللي showScreen() بتعمله - فلازم نقفلها
   // صراحة هنا وإلا ممكن تفضل عالقة ظاهرة فوق شاشة الدخول بعد تسجيل الخروج.
   const cd = document.getElementById('screen-cust-detail'); if (cd) cd.style.display = 'none';
-  // Closure Verification Fix: تنظيف أي نية ربط معلّقة (Pending Link Intent) لو المستخدم سجّل
-  // خروج قبل ما يكمل مسار الربط - يمنع أي State قديم يفضل معلّق في sessionStorage لجلسة تانية
-  // على نفس الجهاز/التاب.
-  clearLinkIntent();
+  // تنظيف حالة المستخدم السابق (تبديل حسابات Google): لا يبقى أي دور/حالة/مسودة من حساب سابق.
   try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {}
   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
   window.CUD = null; window.uploadedDocs = {};
   try { await signOut(auth); } catch(e) {}
+  pickEntryType('customer'); setLoginBusy(false); authLockEnd();
   showScreen('screen-entry');
 }
 
-export async function showForgot() {
-  if (!authLockStart()) { showToast('في عملية شغالة بالفعل، استنى شوية','inf'); return; }
-  const email = document.getElementById('lmail').value.trim();
-  if (!email) { showErr('أدخل بريدك الإلكتروني أولاً'); authLockEnd(); return; }
-  setLoad('login-btn','lsp',true);
-  // رسالة عامة واحدة بصرف النظر عن نتيجة العملية الفعلية - عشان مانكشفش هل البريد ده مسجل
-  // بحساب فعلي ولا لأ (Email Enumeration Protection). النجاح والفشل (حتى user-not-found)
-  // بيوديّا لنفس الرسالة، ماعدا أخطاء واضحة في صيغة البريد نفسها.
-  const genericMsg = 'لو البريد الإلكتروني ده مرتبط بحساب، هيوصلك رابط لإعادة تعيين كلمة المرور خلال دقائق.';
-  try {
-    await sendPasswordResetEmail(auth, email);
-    showToast(genericMsg, 'ok');
-  } catch(e) {
-    if (e.code === 'auth/invalid-email') showErr('صيغة البريد الإلكتروني غير صحيحة');
-    else showToast(genericMsg, 'ok'); // حتى user-not-found بتاخد نفس الرسالة العامة
-  } finally { setLoad('login-btn','lsp',false); authLockEnd(); }
-}
 
 // ===== Phase 2: Secure Account Linking — التنفيذ الفعلي =====
 // مبدأ أساسي: مفيش أي ربط تلقائي، ومفيش ربط بمجرد تطابق البريد. الربط بيحصل بس بعد ما
 // المستخدم يثبت ملكية الحساب الأصلي (تسجيل دخول ناجح بيه)، وبعدين يثبت ملكية الحساب التاني
 // (بإتمام Google OAuth الحقيقي، أو بمعرفة كلمة المرور اللي هو نفسه كتبها).
 
-// Case: Google موجود بالفعل + حاول يعمل Email/Password بنفس البريد (auth/email-already-in-use)
-async function handleEmailAlreadyInUse(email) {
-  let methods = [];
-  try { methods = await fetchSignInMethodsForEmail(auth, email); } catch(e) {}
-  if (methods.includes('google.com')) {
-    // بنعرف بالتحديد إن الحساب ده اتعمل بجوجل - نوجّه المستخدم بدقة، ونخزن نية الربط عشان
-    // نعرضها بعد ما يسجّل دخول بجوجل فعليًا (يعني بعد ما يثبت ملكيته للحساب التاني كمان).
-    // Closure Verification Fix: صفر تخزين لكلمة المرور في sessionStorage - بنخزن نية الربط
-    // (النوع + البريد) بس، وهنطلب كلمة المرور تاني وقت الربط الفعلي (maybeOfferPendingLink).
-    stashLinkIntent({ type: 'add-password', email });
-    showErr('البريد ده مسجل بالفعل عن طريق Google. سجّل دخولك بـ Google أولاً.');
-  } else {
-    showErr('البريد مسجل بالفعل — سجّل دخولك بدل إنشاء حساب جديد');
-  }
-  switchTab('login');
-  const lmail = document.getElementById('lmail'); if (lmail) lmail.value = email;
-}
 
-// Case: Email/Password موجود بالفعل + حاول يعمل Google بنفس البريد
-// (auth/account-exists-with-different-credential) - بتتنده من main.js وقت رجوع الـ Redirect.
-export function handleGoogleAccountConflict(e) {
-  const email = e?.customData?.email || '';
-  if (email) {
-    stashLinkIntent({ type: 'add-google', email });
-    const lmail = document.getElementById('lmail'); if (lmail) lmail.value = email;
-  }
-  switchTab('login');
-  showScreen('screen-auth');
-  showErr(email
-    ? `البريد ${email} مسجّل بالفعل بكلمة مرور. سجّل دخولك بيها الأول.`
-    : 'الحساب ده مسجّل بطريقة تانية. سجّل دخولك بالطريقة الأصلية الأول.');
-}
 
-// بعد أي تسجيل دخول ناجح (Email أو Google) - لو فيه نية ربط مخزّنة ومطابقة لنفس البريد،
-// نعرض على المستخدم اختياريًا يكمل الربط. مفيش أي تنفيذ تلقائي بدون تأكيده الصريح.
-export async function maybeOfferPendingLink(currentEmail) {
-  const intent = readLinkIntent();
-  if (!intent || !currentEmail || intent.email?.toLowerCase() !== currentEmail?.toLowerCase()) { clearLinkIntent(); return; }
-  clearLinkIntent(); // نمسحها فورًا - مرة واحدة بس، صفر تكرار عرض
-  if (intent.type === 'add-google') {
-    const ok = confirm('لأمان حسابك، هل تحب تربط تسجيل الدخول بجوجل بنفس الحساب؟ (اختياري)');
-    if (ok) {
-      try { await linkWithRedirect(auth.currentUser, gProvider); }
-      catch(e) { showToast(firebaseAuthErrorMessage(e), 'err'); }
-    }
-  } else if (intent.type === 'add-password') {
-    const ok = confirm('لأمان حسابك، هل تحب تضيف كلمة مرور لنفس الحساب (بدل الدخول بـ Google بس)؟');
-    if (ok) {
-      // Closure Verification Fix: كلمة المرور بتتطلب هنا مباشرة (Fresh)، مش من أي تخزين سابق -
-      // صفر لحظة واحدة يتم فيها الاحتفاظ بكلمة مرور في الذاكرة أو أي تخزين متصفح.
-      const pass = prompt('اكتب كلمة المرور اللي تحب تستخدمها لهذا الحساب:');
-      if (pass && pass.length >= 6) {
-        try {
-          const cred = EmailAuthProvider.credential(intent.email, pass);
-          await linkWithCredential(auth.currentUser, cred);
-          showToast('تم ربط كلمة المرور بحسابك ✅', 'ok');
-        } catch(e) { showToast(firebaseAuthErrorMessage(e), 'err'); }
-      } else if (pass) {
-        showToast('كلمة المرور يجب أن تكون 6 أحرف على الأقل — لم يتم الربط', 'err');
-      }
-    }
-  }
-}
 
 // ===== AUTHENTICATION V2 — Role Selection (بعد Authentication دائمًا، لكل Provider) =====
 // Provider Independence: الدالة دي هي المكان الوحيد في المشروع اللي بينشئ users/{uid} لأي
@@ -364,10 +245,6 @@ export function editMerchantProfile() { showScreen('screen-complete-merchant'); 
 // ===== ROUTING =====
 export function routeUser() {
   const role = window.CUD?.role;
-  // Phase 2 — Secure Account Linking: نقطة واحدة بعد أي دخول ناجح (Email أو Google) - لو فيه
-  // نية ربط مخزّنة من تعارض Provider سابق ومطابقة لنفس البريد، نعرضها هنا اختياريًا. Fire-and-forget
-  // (مش هيوقف التنقل العادي)، ومحمي بـ .catch عشان مايعملش Unhandled Rejection.
-  maybeOfferPendingLink(window.CU?.email).catch(() => {});
   startNotifListener();
   loadCategories();
   loadBanners();

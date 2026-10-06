@@ -1,8 +1,7 @@
 // ===== main.js — نقطة الدخول: يجمّع كل الموديولات، يربطها بـ window عشان أزرار onclick في
 // الواجهة تلاقيها، يجهّز PWA، ويستمع لحالة تسجيل الدخول في Firebase =====
 
-import { db, auth, doc, getDoc, onAuthStateChanged, getRedirectResult,
-         isSignInWithEmailLink, signInWithEmailLink } from './firebase.js';
+import { db, auth, doc, getDoc, onAuthStateChanged, getRedirectResult } from './firebase.js';
 import { Logger, initOfflineHandling, callCurrentStore, callStore, closeModal, filterProds, openNotifs, openWA, setLoad, showErr, showScreen, showToast, waCurrentStore } from './utils.js';
 import { markNotifRead, startNotifListener, registerNotificationsResets } from './notifications.js';
 import { initAdminMap, initTrackMap, closeLocationPicker, locPickerConfirm, locPickerUseCurrent, locPickerOnSearchInput, locPickerOnCategoryClick, locPickerOnResultClick, recenterTrackMap, recenterRideStatusMap, toggleDriverMap, showDriverMapTab, registerMapsResets } from './maps.js';
@@ -13,7 +12,7 @@ import { delProd, loadMerchantData, loadMerchantOrders, loadMerchantProds, merch
 import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
 import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
 import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
-import { completeRegistration, doLogin, doLogout, doRegister, firebaseAuthErrorMessage, handleGoogleAccountConflict, hideLoading, loginGoogle, pickEntryType, routeUser, selCMCat, showEmailOTP, showForgot, submitMerchantProfile, switchTab, syncToHubSpot, updateEntryLabel , submitCustomerProfile, editMerchantProfile, takeEntryType } from './auth.js';
+import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, pickEntryType, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, takeEntryType, ENTRY_TYPE_KEY } from './auth.js';
 import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
 import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
 import { renderIcons } from './icons.js';
@@ -64,10 +63,10 @@ Object.assign(window, {
   openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner,
   saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate,
   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
-  smUploadLogo, toggleProdAvail, uploadBannerImg, doLogin, doLogout, doRegister, hideLoading,
+  smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, hideLoading,
   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
-  loginGoogle, pickEntryType, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat, showEmailOTP, showForgot, switchTab,
-  syncToHubSpot, updateEntryLabel, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
+  loginGoogle, pickEntryType, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
+  syncToHubSpot, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
   acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus,
   sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer,
   handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel,
@@ -91,28 +90,10 @@ try {
 // ===== AUTH STATE LISTENER =====
 getRedirectResult(auth).catch(e => {
   console.log('Redirect result error:', e);
-  if (e?.code === 'auth/account-exists-with-different-credential') {
-    setTimeout(() => handleGoogleAccountConflict(e), 800);
-  } else if (e?.code && e.code !== 'auth/no-auth-event') {
-    setTimeout(() => showToast(firebaseAuthErrorMessage(e), 'err'), 1500);
+  if (e?.code && e.code !== 'auth/no-auth-event') {
+    showLoginError(firebaseAuthErrorMessage(e)); // الخطأ يظهر داخل شاشة الدخول نفسها (بدل Toast سريع الاختفاء)
   }
 });
-
-if (isSignInWithEmailLink(auth, window.location.href)) {
-  let emailForLink = window.localStorage?.getItem('emailForSignIn');
-  if (!emailForLink) emailForLink = prompt('أدخل بريدك الإلكتروني لتأكيد الدخول:');
-  if (emailForLink) {
-    signInWithEmailLink(auth, emailForLink, window.location.href)
-      .then(() => {
-        window.localStorage?.removeItem('emailForSignIn');
-        window.history.replaceState({}, document.title, window.location.pathname);
-      })
-      .catch(e => {
-        showToast(firebaseAuthErrorMessage(e), 'err');
-        window.history.replaceState({}, document.title, window.location.pathname);
-      });
-  }
-}
 
 initOfflineHandling();
 
@@ -120,6 +101,9 @@ initOfflineHandling();
 // عشان تتماشى مع نفس الترتيب المطلوب (فتح التطبيق ← فحص الإذن ← شرح لو محتاج) من غير ما تلمس
 // أي حاجة في auth.js أو منطق التوجيه حسب الدور.
 initLocationPermissionGate();
+
+// رجوعنا من تحويل Google؟ (التلميح بيتكتب قبل التحويل) => نص تحميل مناسب بدل "جاري التحميل..."
+try { if (sessionStorage.getItem(ENTRY_TYPE_KEY)) { const s = document.getElementById('ld-sub'); if (s) s.textContent = 'جاري إكمال تسجيل الدخول…'; } } catch(e) {}
 
 onAuthStateChanged(auth, async user => {
   if (user) {
