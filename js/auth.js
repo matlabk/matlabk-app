@@ -1,6 +1,7 @@
 // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
 
-import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithRedirect, signOut, updateDoc } from './firebase.js';
+import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc } from './firebase.js';
+import { OFFLINE_ERROR, SESSION_NOT_READY, describeAuthError, isRedirectPendingValid } from './auth-flow.js';
 import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
 import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
 
@@ -20,21 +21,8 @@ import { listenRideOffers, initDriverActiveRideListener } from './rides.js';
 // نقطة واحدة لترجمة أكواد أخطاء Firebase Auth لرسائل عربية واضحة - بدل ما كل دالة تفسّر
 // الأكواد بمنطقها الخاص. أي دالة Auth جديدة مستقبلًا تستخدم هذه الدالة بدل تكرار المنطق.
 export function firebaseAuthErrorMessage(e) {
-  // رسائل عربية مفهومة للمستخدم - بدون أكواد Firebase.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'لا يوجد اتصال بالإنترنت. تأكد من الشبكة وحاول مرة أخرى.';
-  const code = e?.code || '';
-  const map = {
-    'auth/network-request-failed': 'تعذّر الاتصال بالإنترنت. تأكد من الشبكة وحاول مرة أخرى.',
-    'auth/unauthorized-domain': 'تعذّر تسجيل الدخول من هذا الرابط حاليًا. تواصل مع الدعم.',
-    'auth/popup-closed-by-user': 'تم إلغاء تسجيل الدخول. اضغط "المتابعة باستخدام Google" للمحاولة مرة أخرى.',
-    'auth/cancelled-popup-request': 'تم إلغاء تسجيل الدخول. اضغط "المتابعة باستخدام Google" للمحاولة مرة أخرى.',
-    'auth/too-many-requests': 'محاولات كثيرة متتالية. انتظر قليلًا ثم حاول مرة أخرى.',
-    'auth/user-disabled': 'هذا الحساب موقوف. تواصل مع الإدارة.',
-    'auth/operation-not-allowed': 'تسجيل الدخول بـ Google غير متاح مؤقتًا. حاول لاحقًا.',
-    'auth/web-storage-unsupported': 'متصفحك يمنع حفظ بيانات الدخول. فعّل التخزين أو جرّب متصفحًا آخر.',
-    'auth/account-exists-with-different-credential': 'هذا البريد مسجّل بطريقة دخول قديمة لم تعد مدعومة. تواصل مع الإدارة لمساعدتك.',
-  };
-  return map[code] || 'حدث خطأ غير متوقع. حاول مرة أخرى.';
+  // رسائل عربية مفهومة (بدون أكواد Firebase) - الجدول في auth-flow.js ومُختبَر.
+  return describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false }).message;
 }
 
 // ===== Phase 2: Prevent Double Authentication =====
@@ -50,11 +38,17 @@ function authLockEnd() { _authOpInProgress = false; }
 
 // ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
 const GOOGLE_LABEL = 'المتابعة باستخدام Google';
-function setLoginBusy(on) {
+function setLoginBusy(on, label) {
   const b = document.getElementById('lg-google'); if (!b) return;
   b.classList.toggle('is-loading', on); b.disabled = on; b.setAttribute('aria-busy', on ? 'true' : 'false');
-  const l = document.getElementById('lg-google-label'); if (l) l.textContent = on ? 'جاري التحويل إلى Google…' : GOOGLE_LABEL;
+  const l = document.getElementById('lg-google-label'); if (l) l.textContent = on ? (label || 'جاري فتح Google…') : GOOGLE_LABEL;
 }
+function showAltLogin(on) { const el = document.getElementById('lg-alt'); if (el) el.hidden = !on; }
+// بيتنادى من onAuthStateChanged (نجاح/فشل) ومن الخروج: يفك الزر والقفل - مفيش Loading عالق.
+export function resetLoginState() { setLoginBusy(false); authLockEnd(); }
+const REDIRECT_PENDING_KEY = 'matlabk_redirect_pending'; // يُكتب قبل أي تحويل redirect، المسار البديل فقط
+export function hasRedirectPending() { try { return isRedirectPendingValid(sessionStorage.getItem(REDIRECT_PENDING_KEY)); } catch(e) { return false; } }
+export function clearRedirectPending() { try { sessionStorage.removeItem(REDIRECT_PENDING_KEY); } catch(e) {} }
 export function showLoginError(msg) {
   const e = document.getElementById('err-msg'); if (!e) return;
   e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none';
@@ -83,16 +77,45 @@ export function pickEntryType(type) {
   showLoginError('');
 }
 
+// المسار الأساسي: نافذة Google المنبثقة. السبب: authDomain (go-elmanayef.firebaseapp.com) غير نطاق الموقع (matlabk.github.io)،
+// والمتصفحات الحديثة بتحجب تخزين الطرف الثالث => signInWithRedirect بيرجع بدون جلسة (نتيجة فاضية بدون خطأ). الـ Popup مش بيعتمد على كده.
+// مهم: signInWithPopup لازم تتنادى في نفس الـ click handler قبل أي await عشان المتصفح ما يحجبش النافذة.
 export async function loginGoogle() {
-  if (!authLockStart()) return; // منع الضغط المتكرر أثناء التحويل
-  showLoginError('');
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(firebaseAuthErrorMessage({})); authLockEnd(); return; }
-  setLoginBusy(true);
+  if (!authLockStart()) return; // منع الضغط المتكرر
+  showLoginError(''); showAltLogin(false);
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
+  setLoginBusy(true, 'جاري فتح Google…');
   try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); } catch(e) {}
   try {
-    await signInWithRedirect(auth, gProvider); // الصفحة بتتحوّل لـ Google؛ القفل بيفضل لحد الرجوع
+    await signInWithPopup(auth, gProvider);
+    // الدخول الفعلي يؤكده onAuthStateChanged فقط (هو اللي يوجّه ويفك الزر). لو لسه ماوصلش نغيّر الوصف ونراقب.
+    if (!window.CU) {
+      setLoginBusy(true, 'جاري تسجيل دخولك…');
+      setTimeout(() => { if (!window.CU) { resetLoginState(); showLoginError(SESSION_NOT_READY); } }, 15000);
+    }
   } catch(e) {
-    setLoginBusy(false); showLoginError(firebaseAuthErrorMessage(e)); authLockEnd();
+    try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(_) {}
+    resetLoginState();
+    const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
+    if (!d.silent) showLoginError(d.message);
+    if (d.offerRedirect) showAltLogin(true);
+    console.warn('[auth] popup sign-in failed:', e?.code || e);
+  }
+}
+
+// مسار بديل صريح (اختيار المستخدم) لو النافذة المنبثقة محجوبة. ممكن يفشل على متصفحات بتحجب تخزين الطرف الثالث - عشان كده
+// بنسجّل علامة قبل التحويل، ولو رجعنا بدون جلسة main.js بيعرض رسالة واضحة بدل الرجوع الصامت.
+export async function loginGoogleRedirect() {
+  if (!authLockStart()) return;
+  showLoginError(''); showAltLogin(false);
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
+  setLoginBusy(true, 'جاري التحويل إلى Google…');
+  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); sessionStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now())); } catch(e) {}
+  try {
+    await signInWithRedirect(auth, gProvider);
+  } catch(e) {
+    clearRedirectPending(); resetLoginState();
+    showLoginError(firebaseAuthErrorMessage(e));
   }
 }
 
@@ -111,7 +134,7 @@ export async function doLogout() {
   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
   window.CUD = null; window.uploadedDocs = {};
   try { await signOut(auth); } catch(e) {}
-  pickEntryType('customer'); setLoginBusy(false); authLockEnd();
+  pickEntryType('customer'); resetLoginState(); showAltLogin(false); clearRedirectPending();
   showScreen('screen-entry');
 }
 

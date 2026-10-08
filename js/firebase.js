@@ -1,7 +1,7 @@
 // ===== Firebase Module =====
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import { getFirestore, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { getAuth, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithRedirect, getRedirectResult } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+import { getAuth, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 
 // ===== CONFIG =====
 const FC = {
@@ -18,9 +18,11 @@ const app = initializeApp(FC);
 const db = getFirestore(app);
 const auth = getAuth(app);
 const gProvider = new GoogleAuthProvider();
+// MATLABK: دايمًا يعرض اختيار الحساب (مهم لتبديل حسابات Google)
+gProvider.setCustomParameters({ prompt: 'select_account' });
 
 // ===== EXPORTS =====
-export { db, auth, gProvider, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion, signOut, onAuthStateChanged, signInWithRedirect, getRedirectResult };
+export { db, auth, gProvider, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion, signOut, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult };
 
 // ===== CLOUDINARY CONFIG =====
 export const CLOUDINARY_CLOUD = 'yfohr6xd';

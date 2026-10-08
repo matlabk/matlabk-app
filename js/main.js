@@ -2,6 +2,7 @@
 // الواجهة تلاقيها، يجهّز PWA، ويستمع لحالة تسجيل الدخول في Firebase =====
 
 import { db, auth, doc, getDoc, onAuthStateChanged, getRedirectResult } from './firebase.js';
+import { signedOutOutcome } from './auth-flow.js';
 import { Logger, initOfflineHandling, callCurrentStore, callStore, closeModal, filterProds, openNotifs, openWA, setLoad, showErr, showScreen, showToast, waCurrentStore } from './utils.js';
 import { markNotifRead, startNotifListener, registerNotificationsResets } from './notifications.js';
 import { initAdminMap, initTrackMap, closeLocationPicker, locPickerConfirm, locPickerUseCurrent, locPickerOnSearchInput, locPickerOnCategoryClick, locPickerOnResultClick, recenterTrackMap, recenterRideStatusMap, toggleDriverMap, showDriverMapTab, registerMapsResets } from './maps.js';
@@ -12,7 +13,7 @@ import { delProd, loadMerchantData, loadMerchantOrders, loadMerchantProds, merch
 import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
 import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
 import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, pickEntryType, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, takeEntryType, ENTRY_TYPE_KEY } from './auth.js';
+import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, pickEntryType, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, takeEntryType, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
 import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
 import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
 import { renderIcons } from './icons.js';
@@ -63,7 +64,7 @@ Object.assign(window, {
   openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner,
   saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate,
   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
-  smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, hideLoading,
+  smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, loginGoogleRedirect, hideLoading,
   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
   loginGoogle, pickEntryType, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
   syncToHubSpot, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
@@ -88,12 +89,15 @@ try {
 } catch(e) { Logger.error('PWA setup failed (non-fatal):', e); }
 
 // ===== AUTH STATE LISTENER =====
-getRedirectResult(auth).catch(e => {
+// نتيجة العودة من redirect (المسار البديل فقط). بنستناها قبل ما نعتبر "مفيش مستخدم" (انظر onAuthStateChanged) => مفيش race.
+// نتيجة الخطأ بتظهر داخل شاشة الدخول؛ والنتيجة الفاضية بدون جلسة بتتعامل معاها signedOutOutcome (رسالة واضحة مش رجوع صامت).
+let redirectErrorShown = false;
+const redirectSettled = getRedirectResult(auth).catch(e => {
   console.log('Redirect result error:', e);
-  if (e?.code && e.code !== 'auth/no-auth-event') {
-    showLoginError(firebaseAuthErrorMessage(e)); // الخطأ يظهر داخل شاشة الدخول نفسها (بدل Toast سريع الاختفاء)
-  }
+  if (e?.code && e.code !== 'auth/no-auth-event') { redirectErrorShown = true; showLoginError(firebaseAuthErrorMessage(e)); }
+  return null;
 });
+const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
 
 initOfflineHandling();
 
@@ -103,10 +107,11 @@ initOfflineHandling();
 initLocationPermissionGate();
 
 // رجوعنا من تحويل Google؟ (التلميح بيتكتب قبل التحويل) => نص تحميل مناسب بدل "جاري التحميل..."
-try { if (sessionStorage.getItem(ENTRY_TYPE_KEY)) { const s = document.getElementById('ld-sub'); if (s) s.textContent = 'جاري إكمال تسجيل الدخول…'; } } catch(e) {}
+try { if (hasRedirectPending()) { const s = document.getElementById('ld-sub'); if (s) s.textContent = 'جاري إكمال تسجيل الدخول…'; } } catch(e) {}
 
 onAuthStateChanged(auth, async user => {
   if (user) {
+    resetLoginState(); clearRedirectPending(); // Firebase أكّد الجلسة فعليًا => نفك زر الدخول ونمسح علامة الـ redirect
     // MATLABK: منع تسرّب حالة حساب لحساب تاني (تبديل حسابات Google): أي بيانات محلية مرتبطة بمستخدم سابق تتمسح.
     try {
       const last = localStorage.getItem('matlabk_last_uid');
@@ -145,8 +150,14 @@ onAuthStateChanged(auth, async user => {
       showScreen('screen-entry');
     }
   } else {
+    // MATLABK: "مفيش مستخدم" مش نهائي إلا بعد ما getRedirectResult يخلّص (منع race بين النتيجتين). لو كنا بادئين redirect نستنى أطول.
+    const pending = hasRedirectPending();
+    await withTimeout(redirectSettled, pending ? 12000 : 3000);
+    const out = signedOutOutcome({ currentUser: auth.currentUser, redirectPending: pending, existingError: redirectErrorShown });
+    if (out.action === 'ignore') return; // الجلسة اتأكدت فعليًا - الـ callback الخاص بالمستخدم هو اللي بيوجّه
     window.CU = null; window.CUD = null;
-    hideLoading();
+    hideLoading(); resetLoginState(); clearRedirectPending();
+    if (out.error) showLoginError(out.error); // رجوع من Google بدون جلسة: رسالة واضحة بدل الرجوع الصامت لشاشة الدخول
     showScreen('screen-entry');
   }
 });
