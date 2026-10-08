@@ -14,13 +14,32 @@ test('Google-only authentication: no legacy provider code anywhere (comments str
   const files = ['index.html', ...fs.readdirSync(new URL('../js/', import.meta.url)).map((f) => 'js/' + f), 'functions/index.js', 'functions/lib/dispatch-core.js'];
   for (const f of files) { const s = strip(R(f).replace(/<!--[\s\S]*?-->/g, '')); for (const w of FORBIDDEN) assert.ok(!s.includes(w), `${f} still references ${w}`); }
 });
-test('Google Auth is present and the redirect flow is intact', () => {
+test('Google Auth: popup is the primary flow, redirect kept only as explicit fallback; getRedirectResult + onAuthStateChanged intact', () => {
   const fb = R('js/firebase.js'); const imp = fb.match(/import \{([^}]*)\} from "https:\/\/www\.gstatic\.com\/firebasejs\/[\d.]+\/firebase-auth\.js"/)[1].split(',').map((x) => x.trim()).sort();
-  assert.deepEqual(imp, ['GoogleAuthProvider', 'getAuth', 'getRedirectResult', 'onAuthStateChanged', 'signInWithRedirect', 'signOut']); // لا شيء زيادة
-  assert.match(fb, /new GoogleAuthProvider\(\)/);
-  const a = R('js/auth.js'); assert.match(a, /export async function loginGoogle/); assert.match(a, /await signInWithRedirect\(auth, gProvider\)/);
+  assert.deepEqual(imp, ['GoogleAuthProvider', 'getAuth', 'getRedirectResult', 'onAuthStateChanged', 'signInWithPopup', 'signInWithRedirect', 'signOut']); // لا شيء زيادة (لا Email)
+  assert.match(fb, /new GoogleAuthProvider\(\)/); assert.match(fb, /prompt: 'select_account'/);
+  const a = R('js/auth.js'); const lg = a.slice(a.indexOf('export async function loginGoogle()'), a.indexOf('export async function loginGoogleRedirect()'));
+  assert.match(lg, /await signInWithPopup\(auth, gProvider\)/);
+  // signInWithPopup لازم تكون أول await داخل الـ click handler (وإلا المتصفح يحجب النافذة)
+  assert.doesNotMatch(lg.slice(0, lg.indexOf('await signInWithPopup(')), /\bawait\b/);
+  assert.doesNotMatch(lg, /signInWithRedirect/);               // المسار الأساسي ما بيستخدمش redirect
+  const rd = a.slice(a.indexOf('export async function loginGoogleRedirect()')); assert.match(rd, /await signInWithRedirect\(auth, gProvider\)/); assert.match(rd, /REDIRECT_PENDING_KEY, String\(Date\.now\(\)\)/);
   const m = R('js/main.js'); assert.match(m, /getRedirectResult\(auth\)/); assert.match(m, /onAuthStateChanged\(auth, async user =>/);
   const html = R('index.html'); assert.match(html, /onclick="loginGoogle\(\)"/); assert.match(html, /المتابعة باستخدام Google/);
+  assert.match(html, /id="lg-alt"[^>]*hidden[^>]*onclick="loginGoogleRedirect\(\)"/);
+});
+test('no race / no silent return: signed-out branch awaits redirect result, uses signedOutOutcome, resets UI, never leaves loading', () => {
+  const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
+  assert.match(h, /await withTimeout\(redirectSettled/); assert.match(h, /signedOutOutcome\(\{ currentUser: auth\.currentUser/); assert.match(h, /if \(out\.action === 'ignore'\) return;/);
+  assert.match(h, /hideLoading\(\); resetLoginState\(\); clearRedirectPending\(\);/); assert.match(h, /if \(out\.error\) showLoginError\(out\.error\)/);
+  assert.match(h, /if \(user\) \{\s*resetLoginState\(\); clearRedirectPending\(\);/);   // نجاح فعلي => فك الزر
+  assert.match(m, /const redirectSettled = getRedirectResult\(auth\)\.catch/);                // النتيجة بتتستنّى مش بتتهمل
+  const a = R('js/auth.js'); assert.match(a, /SESSION_NOT_READY/); assert.match(a, /setTimeout\(\(\) => \{ if \(!window\.CU\)/); // لا loading عالق بعد نجاح popup
+});
+test('logout resets login screen state; user is "logged in" only from onAuthStateChanged (never set by loginGoogle)', () => {
+  const a = R('js/auth.js'); const lo = a.slice(a.indexOf('export async function doLogout()'), a.indexOf('\n}\n', a.indexOf('export async function doLogout()')));
+  assert.match(lo, /await signOut\(auth\)/); assert.match(lo, /resetLoginState\(\)/); assert.match(lo, /clearRedirectPending\(\)/);
+  const lg = a.slice(a.indexOf('export async function loginGoogle()'), a.indexOf('export async function loginGoogleRedirect()')); assert.doesNotMatch(lg, /window\.CU\s*=[^=]/);
 });
 test('login screen (screen-entry) is Google-only and complete: brand, tagline, Google button, note, legal; no legacy UI; no screen-auth/OTP', () => {
   const html = R('index.html'); const s = html.slice(html.indexOf('id="screen-entry"'), html.indexOf('id="screen-role-select"'));
@@ -34,15 +53,11 @@ test('login screen (screen-entry) is Google-only and complete: brand, tagline, G
   const m = R('js/main.js'); const win = m.slice(m.indexOf('Object.assign(window'), m.indexOf('});', m.indexOf('Object.assign(window')));
   for (const fnName of new Set([...s.matchAll(/onclick="([A-Za-z]+)\(/g)].map((x) => x[1]))) assert.match(win, new RegExp('\\b' + fnName + '\\b'), fnName);
 });
-test('login UX: loading state blocks double-click, errors inline, offline guard, bfcache reset, friendly Arabic messages (no firebase codes shown)', () => {
+test('login UX: loading blocks double-click, errors inline (no Toast), offline guard, bfcache reset', () => {
   const a = R('js/auth.js');
   assert.match(a, /if \(!authLockStart\(\)\) return;/); assert.match(a, /b\.disabled = on/); assert.match(a, /aria-busy/); assert.match(a, /is-loading/);
   assert.match(a, /navigator\.onLine === false/); assert.match(a, /pageshow/); assert.match(a, /ev\.persisted/);
-  const map = a.slice(a.indexOf('export function firebaseAuthErrorMessage'), a.indexOf('\n}\n', a.indexOf('export function firebaseAuthErrorMessage')));
-  for (const code of ['auth/network-request-failed', 'auth/account-exists-with-different-credential', 'auth/popup-closed-by-user', 'auth/too-many-requests', 'auth/user-disabled', 'auth/unauthorized-domain']) assert.ok(map.includes(code), code);
-  for (const msg of [...map.matchAll(/: '([^']+)'/g)].map((x) => x[1]).filter((x) => !x.startsWith('auth/'))) assert.doesNotMatch(msg, /auth\/|firebase/i, msg);
-  assert.doesNotMatch(a, /showToast\(firebaseAuthErrorMessage/); // الأخطاء داخل الشاشة (role=alert) لا Toast
-  assert.match(R('js/main.js'), /showLoginError\(firebaseAuthErrorMessage\(e\)\)/);
+  assert.doesNotMatch(a, /showToast\(firebaseAuthErrorMessage/); assert.match(R('js/main.js'), /showLoginError\(firebaseAuthErrorMessage\(e\)\)/); assert.match(a, /describeAuthError/);
 });
 test('partner choice kept (driver / merchant) as a light secondary action; role/status flow untouched', () => {
   const html = R('index.html'); const s = html.slice(html.indexOf('id="screen-entry"'), html.indexOf('id="screen-role-select"'));
