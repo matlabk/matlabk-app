@@ -6,7 +6,8 @@
 export const validPhone = (p) => typeof p === 'string' && p.length >= 10 && p.length <= 15;
 export function driverComplete(u) {
   return typeof u.fullName === 'string' && u.fullName.length >= 2 && validPhone(u.phone) &&
-    typeof u.nationalId === 'string' && u.nationalId.length === 14 && !!u.vehicleType && !!u.plateNumber &&
+    typeof u.nationalId === 'string' && u.nationalId.length === 14 && !!u.vehicleType &&
+    // plateNumber / vehicleModel / vehicleColor اختياريون
     u.docsSubmitted === true && !!u.docs && typeof u.docs === 'object' && Object.keys(u.docs).length > 0;
 }
 export function merchantComplete(store) {
