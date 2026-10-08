@@ -59,6 +59,8 @@ const ADMIN_NEXT_STATUS = {
 // ===== ADMIN FUNCTIONS =====
 export let adminOrdersUnsub = null, adminUsersUnsub = null;
 export async function loadAdminData() {
+  // MATLABK (defense in depth): لا نفتح أي listener إداري لو الدور المحمَّل من Firestore مش admin. الحماية الحقيقية: isAdmin() في firestore.rules.
+  if (window.CUD?.role !== 'admin') { console.warn('[admin] blocked: not an admin account'); return; }
   if (adminOrdersUnsub) return;
   loadPricingSettingsUI();
   loadCommissionUI();

@@ -1,7 +1,7 @@
 // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
 
 import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc } from './firebase.js';
-import { OFFLINE_ERROR, SESSION_NOT_READY, describeAuthError, isRedirectPendingValid } from './auth-flow.js';
+import { OFFLINE_ERROR, SESSION_NOT_READY, describeAuthError, isRedirectPendingValid, roleIntentConflict } from './auth-flow.js';
 import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
 import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
 
@@ -37,11 +37,19 @@ function authLockStart() {
 function authLockEnd() { _authOpInProgress = false; }
 
 // ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
-const GOOGLE_LABEL = 'المتابعة باستخدام Google';
+const LOGIN_BUTTONS = {
+  customer: { btn: 'lg-google', label: 'lg-google-label', text: 'الدخول كعميل باستخدام Google' },
+  driver: { btn: 'lg-driver', label: 'lg-driver-label', text: 'دخول الكابتن' },
+  merchant: { btn: 'lg-merchant', label: 'lg-merchant-label', text: 'دخول التاجر' },
+};
 function setLoginBusy(on, label) {
-  const b = document.getElementById('lg-google'); if (!b) return;
-  b.classList.toggle('is-loading', on); b.disabled = on; b.setAttribute('aria-busy', on ? 'true' : 'false');
-  const l = document.getElementById('lg-google-label'); if (l) l.textContent = on ? (label || 'جاري فتح Google…') : GOOGLE_LABEL;
+  const active = LOGIN_BUTTONS[window.selectedType] || LOGIN_BUTTONS.customer;
+  for (const k of Object.keys(LOGIN_BUTTONS)) {
+    const c = LOGIN_BUTTONS[k]; const b = document.getElementById(c.btn); if (!b) continue;
+    const isActive = on && c === active;
+    b.disabled = on; b.setAttribute('aria-busy', isActive ? 'true' : 'false'); b.classList.toggle('is-loading', isActive);
+    const l = document.getElementById(c.label); if (l) l.textContent = isActive ? (label || 'جاري فتح Google…') : c.text;
+  }
 }
 function showAltLogin(on) { const el = document.getElementById('lg-alt'); if (el) el.hidden = !on; }
 // بيتنادى من onAuthStateChanged (نجاح/فشل) ومن الخروج: يفك الزر والقفل - مفيش Loading عالق.
@@ -64,30 +72,26 @@ export function hideLoading() {
 }
 
 
-const ENTRY_MODES = {
-  driver: 'التسجيل ككابتن توصيل — طلبك يُراجَع من الإدارة قبل التفعيل',
-  merchant: 'التسجيل كتاجر — طلبك يُراجَع من الإدارة قبل التفعيل',
-};
-// نوع الحساب = تلميح UI فقط لمستخدم Google الجديد (العميل هو الافتراضي). الصلاحيات الفعلية في Firestore Rules.
-export function pickEntryType(type) {
-  window.selectedType = type === 'driver' || type === 'merchant' ? type : 'customer';
-  const mode = ENTRY_MODES[window.selectedType];
-  const box = document.getElementById('lg-mode'), txt = document.getElementById('lg-mode-text'), join = document.getElementById('lg-join');
-  if (box) box.hidden = !mode; if (txt) txt.textContent = mode || ''; if (join) join.hidden = !!mode;
-  showLoginError('');
-}
-
 // المسار الأساسي: نافذة Google المنبثقة. السبب: authDomain (go-elmanayef.firebaseapp.com) غير نطاق الموقع (matlabk.github.io)،
 // والمتصفحات الحديثة بتحجب تخزين الطرف الثالث => signInWithRedirect بيرجع بدون جلسة (نتيجة فاضية بدون خطأ). الـ Popup مش بيعتمد على كده.
 // مهم: signInWithPopup لازم تتنادى في نفس الـ click handler قبل أي await عشان المتصفح ما يحجبش النافذة.
-export async function loginGoogle() {
+export async function loginGoogle(type) {
+  // type: 'customer' | 'driver' | 'merchant' (الزر اللي ضغطه المستخدم). مفيش حالة قديمة: كل ضغطة بتحدد النوع من جديد.
+  window.selectedType = type === 'driver' || type === 'merchant' ? type : 'customer';
   if (!authLockStart()) return; // منع الضغط المتكرر
   showLoginError(''); showAltLogin(false);
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
   setLoginBusy(true, 'جاري فتح Google…');
-  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); } catch(e) {}
+  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType); } catch(e) {}
   try {
-    await signInWithPopup(auth, gProvider);
+    const cred = await signInWithPopup(auth, gProvider);
+    if (window.CU && cred?.user && window.CU.uid === cred.user.uid) {
+      // نفس المستخدم كان داخل بالفعل (مفيش onAuthStateChanged جديد): نطبّق فحص الدور هنا بنفسنا.
+      resetLoginState();
+      const msg = roleIntentConflict(takeEntryType(), window.CUD?.role);
+      if (msg) await rejectRoleMismatch(msg); else routeUser();
+      return;
+    }
     // الدخول الفعلي يؤكده onAuthStateChanged فقط (هو اللي يوجّه ويفك الزر). لو لسه ماوصلش نغيّر الوصف ونراقب.
     if (!window.CU) {
       setLoginBusy(true, 'جاري تسجيل دخولك…');
@@ -101,6 +105,12 @@ export async function loginGoogle() {
     if (d.offerRedirect) showAltLogin(true);
     console.warn('[auth] popup sign-in failed:', e?.code || e);
   }
+}
+
+// الحساب مرتبط بدور مختلف عن اللي اختاره المستخدم: نعرض الرسالة ونسجّل الخروج (بدون مسح أي بيانات) ولا نفتح واجهة الدور التاني.
+export async function rejectRoleMismatch(message) {
+  await doLogout();
+  showLoginError(message);
 }
 
 // مسار بديل صريح (اختيار المستخدم) لو النافذة المنبثقة محجوبة. ممكن يفشل على متصفحات بتحجب تخزين الطرف الثالث - عشان كده
@@ -134,7 +144,7 @@ export async function doLogout() {
   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
   window.CUD = null; window.uploadedDocs = {};
   try { await signOut(auth); } catch(e) {}
-  pickEntryType('customer'); resetLoginState(); showAltLogin(false); clearRedirectPending();
+  window.selectedType = 'customer'; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
   showScreen('screen-entry');
 }
 

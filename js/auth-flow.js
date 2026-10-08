@@ -41,3 +41,16 @@ export function isRedirectPendingValid(stamp, now = Date.now()) {
   const t = Number(stamp);
   return Number.isFinite(t) && t > 0 && now - t >= 0 && now - t <= REDIRECT_PENDING_TTL_MS;
 }
+
+// ===== فصل الأدوار (عميل / كابتن / تاجر) على نفس حساب Google =====
+// الدور الحقيقي من Firestore (users/{uid}.role) - والـ Rules تمنع تغييره (role ثابت) وتمنع إنشاء مستند تاني بنفس الـ uid.
+// intent = اللي المستخدم اختاره في شاشة الدخول (customer | driver | merchant). null = جلسة مستعادة بدون اختيار => نوجّه بالدور المخزّن.
+export const ROLE_LABELS = { customer: 'عميل', driver: 'كابتن', merchant: 'تاجر', admin: 'إدارة' };
+const INTENT_AS = { customer: 'كعميل', driver: 'ككابتن', merchant: 'كتاجر' };
+export function roleIntentConflict(intent, role) {
+  if (!intent || !role || !INTENT_AS[intent] || !ROLE_LABELS[role]) return null;
+  if (role === intent) return null;
+  // حساب الإدارة بيدخل من زر الدخول الرئيسي (بدون زر ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
+  if (role === 'admin' && intent === 'customer') return null;
+  return `هذا البريد الإلكتروني مستخدم بالفعل لحساب ${ROLE_LABELS[role]} في MATLABK. لا يمكن استخدامه ${INTENT_AS[intent]}. يرجى استخدام بريد إلكتروني آخر.`;
+}
