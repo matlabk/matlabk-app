@@ -1,0 +1,1113 @@
+diff -ruN orig/MATLABK-REPORT.md proj/MATLABK-REPORT.md
+--- orig/MATLABK-REPORT.md	1970-01-01 00:00:00.000000000 +0000
++++ proj/MATLABK-REPORT.md	2026-10-09 21:22:58.959822944 +0000
+@@ -0,0 +1,55 @@
++# MATLABK-REPORT — فحص المشروع وإصلاح تعارض الأدوار
++
++**كل التعديلات محلية فقط. لم يُنشر شيء على GitHub أو Firebase، ولم تُغيَّر أي إعدادات خارجية، ولا توجد أسرار أو مفاتيح مضافة.**
++
++## 1) بنية المشروع (كما وُجدت فعلًا)
++- Web App ثابت: `index.html` + `css/styles.css` + وحدات ES في `js/` (بدون bundler). Firebase Web SDK v11 من gstatic: Auth (Google فقط) + Firestore.
++- `firestore.rules` (~100KB) و`functions/` (Cloud Functions للتوزيع) و`workers/cloudinary-sign` و`scripts/normalize-pending.mjs`.
++- مسار الدخول: `js/auth.js` (`loginGoogle` بـ `signInWithPopup`، `doLogout`، `routeUser`) و`js/main.js` (`onAuthStateChanged`) و`js/auth-flow.js` (منطق نقي) و`js/account-state.js` (`resolveRoute`).
++- **الملف المرفق كان يحتوي إصلاحًا جزئيًا سابقًا** لتعارض الأدوار (تقرير `MATLABK-ROLE-AUTH-UX-REPORT.md`). فحصته ولم أفترض صحته؛ بنيت عليه وأصلحت ما تبيّن أنه ناقص (القسم 2).
++- خط الأساس قبل أي تعديل: 96 اختبارًا ناجحًا (لكنها اختبارات نصية/ثابتة على الكود، لا تشغّل المنطق).
++
++## 2) السبب الجذري
++الإصلاح السابق فحص الدور المختار مقابل `users/{uid}.role` فقط عند توفر الاختيار، وبقيت ثغرات تجعل الدخول بدور غير مقصود ممكنًا:
++1. **فشل مفتوح (fail-open) في `routeUser/resolveRoute`:** أي دور غائب أو غير معروف، أو `CUD = null`، كان يسقط إلى **لوحة العميل**.
++2. `roleIntentConflict` كانت ترجع «لا تعارض» لو الدور المخزّن غير معروف، أو لو الدور المختار غاب (مثلًا `sessionStorage` معطّل أو عاد من redirect بدون اختيار)؛ أي أن غياب الاختيار كان يُعامل كتصريح.
++3. **سباق حقيقي (اكتشفته الاختبارات السلوكية):** بعد الرفض و`signOut`، كان `window.CU` يبقى مضبوطًا، فيكمل `loginGoogle` بعد رجوع نافذة Google ويمرّر نفس الدخول على التوجيه **مرة ثانية بدون الدور المختار**، فيُعامَل كجلسة مستعادة ويفتح لوحة الدور الفعلي بعد رسالة الرفض.
++4. فرع «نفس المستخدم داخل بالفعل» كان يعتمد على `window.CUD` (قد يكون فارغًا أو قديمًا) بدل قراءة طازجة.
++5. فشل قراءة `users/{uid}` كان يترك المستخدم داخلًا بدون حالة واضحة، والدور المختار القديم يبقى عالقًا.
++6. لم يكن هناك صفحة رئيسية ولا مرحلة اختيار نوع حساب منفصلة؛ الشاشة الواحدة كانت تفترض «عميل» افتراضيًا.
++
++## 3) ما تغيّر
++| الملف | التغيير |
++|---|---|
++| `js/auth-flow.js` | `evaluateRoleGate` (القرار: register / allow / reject / deny)، رسالة التعارض بالصياغة المعتمدة، حفظ الدور المختار مع صلاحية 10 دقائق (`encodeIntent/decodeIntent`)، نصوص الأدوار والرسائل. رسالة حساب الإدارة عامة (لا تكشف وجوده). |
++| `js/account-state.js` | `resolveRoute`: أي دور غير `customer` معروف يرجع `unknown` بدل لوحة العميل. |
++| `js/auth.js` | بوابة واحدة `handleSignedIn` لكل المسارات (popup / redirect / استعادة جلسة / نفس المستخدم). الدور المختار يُحفظ قبل Google (ذاكرة + sessionStorage) ويُستهلك مرة واحدة. `routeUser` يرفض الدور المجهول قبل تحميل أي بيانات. إصلاح السباق. خروج حقيقي يصفّر `CU/CUD/selectedType/الاختيار`. شاشات: `openRolePick/pickRole/openLogin`. إعادة محاولة بنفس الدور بعد فشل القراءة. |
++| `js/main.js` | المستمع يلتقط الدور المختار ثم يستدعي البوابة فقط (لا توجيه مباشر). |
++| `index.html`, `css/styles.css` | الصفحة الرئيسية (`screen-entry`) ← اختيار النوع (`screen-role-pick`) ← الدخول بـ Google (`screen-login`). `screen-entry` بقي اسمها لأن بقية الكود يرجع إليها بعد الخروج. |
++| `tests/*` | تحديث اختبارات العقد لتطابق البنية الجديدة، واختبارات سلوكية جديدة (القسم 5). |
++**لم يُلمس:** `firestore.rules`، `functions/**`، `js/firebase.js` (popup/authDomain)، الطلبات والتسعير وتوزيع الكباتن، وقواعد حقول الكابتن.
++
++## 4) سلوك الدخول والخروج النهائي
++- **أول زيارة / بعد الخروج:** الصفحة الرئيسية (خدمات + زر «تسجيل الدخول / ابدأ الآن») ← اختيار عميل أو تاجر أو كابتن ← زر «المتابعة باستخدام Google» ← فحص الدور ← اللوحة.
++- **التعارض:** تسجيل خروج فعلي ثم الرجوع لشاشة الدخول للدور المختار مع الرسالة، مثال: «هذا البريد الإلكتروني مسجّل بالفعل كحساب عميل. لاستخدام MATLABK ككابتن، يُرجى تسجيل الدخول ببريد Google آخر.» الدور لا يتغير ولا يُنشأ مستند ثانٍ ولا تُكتب أي بيانات.
++- **زيارات لاحقة:** جلسة Firebase فعالة ← انتظار قراءة `users/{uid}` ← التوجيه بالدور والحالة (pending/incomplete تبقى على شاشات الاستكمال/المراجعة).
++- **حالات آمنة:** دور مجهول أو دخول جديد بلا اختيار ← رفض + خروج. فشل القراءة ← رسالة + «إعادة المحاولة» (تحتفظ بالدور المختار) بدون أي لوحة.
++- **الخروج:** `signOut` فعلي، مسح الاختيار والحالة المعلقة، العودة للرئيسية، ولا حذف لبيانات Firestore.
++- **admin:** يدخل من خيار «عميل» فقط (لا خيار ظاهر للإدارة) كما كان؛ لم أضف أي مدير. لإعداد أول مدير بأمان (يدويًا من Console، لم أنفذه): سجّل بحساب Google المطلوب كعميل، ثم غيّر `role` إلى `admin` و`status` إلى `active` في `users/{uid}`، ثم اخرج وادخل.
++
++## 5) الاختبارات
++**نُفِّذت فعلًا (`cd tests && npm run unit`): 135 اختبارًا، 135 ناجحًا، 0 فاشل.** إضافة إلى `import-check` و`undef-check` و`node --check` على كل الملفات.
++- جديدة سلوكية (`role-gate.test.mjs`، 34): تشغّل كود `auth.js` الحقيقي مع محاكاة Firebase والمتصفح: الحالات 1–12 المطلوبة، منها كل تقاطعات الأدوار الستة (لا لوحة، خروج، الرسالة الحرفية، صفر كتابات)، استعادة الجلسة، الخروج، الدور القديم العالق، فشل القراءة وإعادة المحاولة، حساب جديد incomplete، pending، admin، دور مجهول، `sessionStorage` معطّل، ضغط مزدوج، سباق popup/المستمع.
++- جديدة نقية (`role-gate-pure.test.mjs`، 5) + اختبارات العقد والرسائل المحدّثة.
++**لم يمكن تشغيلها:**
++- اختبارات Firestore Rules على Emulator (`tests/firestore.rules.test.mjs`): `npm install` يتوقف (لا شبكة) فلا `firebase-tools` ولا الـ Emulator. الـ Rules لم أغيّرها، لكن لم يُتحقق منها هنا.
++- **لم يُجرَ اختبار Google في متصفح حقيقي.** ما سبق محاكاة لـ Firebase، وليس إثباتًا لسلوك SDK الفعلي.
++- لم أرَ الشاشات الجديدة بصريًا (لا متصفح)؛ التنسيق مبني على نفس متغيرات CSS الحالية ويحتاج مراجعة يدوية على الهاتف.
++
++## 6) مخاطر وفحص يدوي مطلوب
++1. Google popup حقيقي: عميل ← كابتن / تاجر، وكابتن/تاجر ← عميل، والتأكد من الرسالة وبقاء بيانات العميل سليمة.
++2. ترتيب أحداث SDK الفعلي (popup مقابل `onAuthStateChanged`) على iOS Safari وAndroid Chrome؛ الإصلاح مصمم ليتحمل الترتيبين.
++3. تسجيل خروج ثم فتح الموقع من جديد (لا عودة تلقائية للوحة)، وإعادة تحميل الصفحة أثناء النافذة.
++4. شكل الصفحة الرئيسية وبطاقات الاختيار (RTL، شاشات صغيرة).
++5. تشغيل اختبارات Rules على Emulator على جهازك: `cd tests && npm install && npm test`.
++6. الحماية الحقيقية تبقى في Firestore Rules (الدور ثابت، لا مستند ثانٍ لنفس uid)؛ فحص الواجهة هنا UX وطبقة إضافية، لا بديل عنها.
+diff -ruN orig/css/styles.css proj/css/styles.css
+--- orig/css/styles.css	2026-10-08 09:21:41.000000000 +0000
++++ proj/css/styles.css	2026-10-09 21:17:35.161560669 +0000
+@@ -963,3 +963,28 @@
+ @keyframes lgUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+ @media (prefers-reduced-motion:reduce){.lg-brand,.lg-action{animation:none}.lg-google{transition:none}.lg-spin{animation-duration:1.6s}}
+ @media (max-height:640px){.lg-brand{margin-top:8px}.lg-action{margin-top:24px}.lg-mark{width:60px;height:60px;margin-bottom:12px}}
++
++/* ===== MATLABK: الصفحة الرئيسية + اختيار نوع الحساب + شاشة الدخول ===== */
++#screen-role-pick,#screen-login{background:#fff radial-gradient(70% 38% at 50% 0,var(--color-primary-soft),rgba(255,255,255,0));min-height:100vh;min-height:100dvh}
++#screen-role-pick.active,#screen-login.active{display:block}
++.hm-services{margin-top:clamp(20px,5vh,40px)}
++.hm-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
++.hm-list li{display:flex;align-items:center;gap:12px;background:#fff;border:1.5px solid var(--color-neutral-200);border-radius:14px;padding:12px 14px;text-align:right}
++.hm-ic{width:40px;height:40px;border-radius:12px;background:var(--color-primary-soft);color:var(--color-primary);display:flex;align-items:center;justify-content:center;flex:none}
++.hm-list strong{display:block;font-size:15px;font-weight:800;color:var(--color-text)}
++.hm-list small{display:block;font-size:13px;color:var(--color-text-secondary);margin-top:2px}
++.hm-cta{width:100%;min-height:56px;border:none;border-radius:14px;background:var(--color-primary);color:#fff;font-family:var(--font-family);font-size:16px;font-weight:800;cursor:pointer;box-shadow:0 10px 24px rgba(255,107,0,.25)}
++.hm-cta:active{transform:scale(.985)}
++.hm-cta:focus-visible,.rp-card:focus-visible,.lg-back:focus-visible{outline:3px solid rgba(255,107,0,.55);outline-offset:3px}
++.lg-back{min-height:44px;margin-top:10px;padding:0 6px;background:none;border:none;font-family:var(--font-family);font-size:14px;font-weight:800;color:var(--color-text);cursor:pointer;align-self:flex-start}
++.lg-back:disabled{opacity:.5;cursor:not-allowed}
++.rp-head{margin-top:clamp(12px,4vh,32px)}
++.rp-title{font-size:22px;font-weight:900;color:var(--color-text);text-align:center}
++.lg-role-title{margin-bottom:16px}
++.rp-list{margin-top:26px;display:grid;gap:12px}
++.rp-card{display:flex;align-items:center;gap:14px;width:100%;min-height:76px;padding:14px 16px;background:#fff;border:1.5px solid var(--color-neutral-200);border-radius:16px;font-family:var(--font-family);text-align:right;cursor:pointer;color:var(--color-text)}
++.rp-card:hover{border-color:var(--color-primary);background:var(--color-primary-soft)}
++.rp-card:active{transform:scale(.985)}
++.rp-ic{width:48px;height:48px;border-radius:14px;background:var(--color-primary-soft);color:var(--color-primary);display:flex;align-items:center;justify-content:center;flex:none}
++.rp-tx strong{display:block;font-size:16px;font-weight:800}
++.rp-tx small{display:block;font-size:13px;color:var(--color-text-secondary);margin-top:3px}
+diff -ruN orig/index.html proj/index.html
+--- orig/index.html	2026-10-08 09:21:41.000000000 +0000
++++ proj/index.html	2026-10-09 21:17:35.160698286 +0000
+@@ -58,7 +58,7 @@
+ <!-- ===== TOAST ===== -->
+ <div id="toast" class="toast"></div>
+ 
+-<!-- ===== LOGIN SCREEN (MATLABK: Google فقط؛ هي نفسها screen-entry لأن باقي الكود بيرجع لها بعد الخروج) ===== -->
++<!-- ===== الصفحة الرئيسية (screen-entry: باقي الكود بيرجع لها بعد الخروج) ===== -->
+ <div id="screen-entry" class="screen active">
+   <div class="lg-wrap">
+     <header class="lg-brand">
+@@ -67,35 +67,60 @@
+       <p class="lg-tag">خدماتك أقرب إليك</p>
+       <p class="lg-sub">توصيل • مشاوير • خدمات داخل المنايف</p>
+     </header>
++    <section class="hm-services" aria-label="خدمات MATLABK">
++      <ul class="hm-list">
++        <li><span class="hm-ic" data-icon="package" data-size="22"></span><div><strong>توصيل الطلبات</strong><small>من متاجر المنايف إلى باب بيتك</small></div></li>
++        <li><span class="hm-ic" data-icon="bike" data-size="22"></span><div><strong>المشاوير</strong><small>كابتن قريب منك في أي وقت</small></div></li>
++        <li><span class="hm-ic" data-icon="map-pin" data-size="22"></span><div><strong>خدمات محلية</strong><small>كل ما تحتاجه داخل نطاق المنايف</small></div></li>
++      </ul>
++    </section>
++    <section class="lg-action" aria-label="البدء">
++      <button type="button" id="home-start" class="hm-cta" onclick="openRolePick()">تسجيل الدخول / ابدأ الآن</button>
++      <div class="lg-err-slot"><div id="home-err" class="lg-err" role="alert" aria-live="assertive"></div></div>
++      <button type="button" id="home-retry" class="lg-link lg-alt" hidden onclick="retryLoadAccount()">إعادة المحاولة</button>
++    </section>
++    <p class="lg-legal">بمتابعتك، أنت توافق على شروط الاستخدام وسياسة الخصوصية.</p>
++  </div>
++</div>
++
++<!-- ===== اختيار نوع الحساب ===== -->
++<div id="screen-role-pick" class="screen">
++  <div class="lg-wrap">
++    <button type="button" class="lg-back" onclick="showScreen('screen-entry')"><span aria-hidden="true">→</span> رجوع</button>
++    <header class="lg-brand rp-head">
++      <h1 class="rp-title">اختر نوع حسابك</h1>
++      <p class="lg-sub">حدّد كيف تريد استخدام MATLABK</p>
++    </header>
++    <div class="rp-list" role="group" aria-label="نوع الحساب">
++      <button type="button" class="rp-card" onclick="pickRole('customer')"><span class="rp-ic" data-icon="user" data-size="26"></span><span class="rp-tx"><strong>الدخول كعميل</strong><small>اطلب من المتاجر واطلب مشوارًا</small></span></button>
++      <button type="button" class="rp-card" onclick="pickRole('merchant')"><span class="rp-ic" data-icon="store" data-size="26"></span><span class="rp-tx"><strong>الدخول كتاجر</strong><small>اعرض منتجاتك واستقبل الطلبات</small></span></button>
++      <button type="button" class="rp-card" onclick="pickRole('driver')"><span class="rp-ic" data-icon="bike" data-size="26"></span><span class="rp-tx"><strong>الدخول ككابتن توصيل</strong><small>وصّل الطلبات واكسب</small></span></button>
++    </div>
++  </div>
++</div>
+ 
++<!-- ===== شاشة الدخول (Google فقط) للدور المختار ===== -->
++<div id="screen-login" class="screen" data-role="">
++  <div class="lg-wrap">
++    <button type="button" id="lg-back" class="lg-back" onclick="openRolePick()"><span aria-hidden="true">→</span> تغيير نوع الحساب</button>
++    <header class="lg-brand">
++      <div class="lg-mark" aria-hidden="true"><span data-icon="bike" data-size="34"></span></div>
++      <h1 class="lg-name">MATLAB<span>K</span></h1>
++      <p class="lg-tag">خدماتك أقرب إليك</p>
++      <p class="lg-sub">توصيل • مشاوير • خدمات داخل المنايف</p>
++    </header>
+     <section class="lg-action" aria-label="تسجيل الدخول">
+-      <button type="button" id="lg-google" class="lg-google" onclick="loginGoogle('customer')">
++      <h2 id="lg-role-title" class="rp-title lg-role-title">الدخول</h2>
++      <button type="button" id="lg-google" class="lg-google" onclick="loginGoogle()">
+         <svg class="lg-g" aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+-        <span id="lg-google-label">الدخول كعميل باستخدام Google</span>
++        <span id="lg-google-label">المتابعة باستخدام Google</span>
+         <span class="lg-spin" aria-hidden="true"></span>
+       </button>
+-      <p class="lg-note">تسجيل سريع وآمن باستخدام حساب Google</p>
++      <p id="lg-role-note" class="lg-note"></p>
+       <div class="lg-err-slot"><div id="err-msg" class="lg-err" role="alert" aria-live="assertive"></div></div>
++      <button type="button" id="lg-retry" class="lg-link lg-alt" hidden onclick="retryLoadAccount()">إعادة المحاولة</button>
+       <button type="button" id="lg-alt" class="lg-link lg-alt" hidden onclick="loginGoogleRedirect()">المتابعة بدون نافذة منبثقة</button>
+     </section>
+-
+-    <section class="lg-partners" aria-label="دخول الكباتن والتجار">
+-      <p class="lg-partners-t">هل أنت كابتن أو تاجر؟</p>
+-      <div class="lg-partners-row">
+-        <button type="button" id="lg-driver" class="lg-partner" onclick="loginGoogle('driver')">
+-          <svg class="lg-g lg-g-sm" aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+-          <span id="lg-driver-label">دخول الكابتن</span>
+-          <span class="lg-spin" aria-hidden="true"></span>
+-        </button>
+-        <button type="button" id="lg-merchant" class="lg-partner" onclick="loginGoogle('merchant')">
+-          <svg class="lg-g lg-g-sm" aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+-          <span id="lg-merchant-label">دخول التاجر</span>
+-          <span class="lg-spin" aria-hidden="true"></span>
+-        </button>
+-      </div>
+-      <p class="lg-partners-n">بحساب Google أيضًا، ويُراجَع حسابك من الإدارة قبل التفعيل.</p>
+-    </section>
+-
+     <p class="lg-legal">بمتابعتك، أنت توافق على شروط الاستخدام وسياسة الخصوصية.</p>
+   </div>
+ </div>
+diff -ruN orig/js/account-state.js proj/js/account-state.js
+--- orig/js/account-state.js	2026-10-08 09:21:52.000000000 +0000
++++ proj/js/account-state.js	2026-10-09 15:29:22.914141615 +0000
+@@ -37,6 +37,8 @@
+     if (st === STATUS.PENDING || st === STATUS.REJECTED) return 'merchant-status';
+     return 'merchant-complete'; // incomplete أو أي حالة غير معروفة = لا صلاحيات تشغيلية
+   }
++  // fail-closed: أي دور غير معروف/غائب لا يفتح واجهة العميل ضمنيًا (كان يسقط هنا في customer).
++  if (u.role !== 'customer') return 'unknown';
+   if (st === STATUS.BLOCKED || st === STATUS.DELETED) return 'blocked';
+   return isCustomerProfileComplete(u) ? 'customer-home' : 'customer-complete';
+ }
+diff -ruN orig/js/auth-flow.js proj/js/auth-flow.js
+--- orig/js/auth-flow.js	2026-10-08 09:21:27.000000000 +0000
++++ proj/js/auth-flow.js	2026-10-09 15:29:19.783330921 +0000
+@@ -44,13 +44,56 @@
+ 
+ // ===== فصل الأدوار (عميل / كابتن / تاجر) على نفس حساب Google =====
+ // الدور الحقيقي من Firestore (users/{uid}.role) - والـ Rules تمنع تغييره (role ثابت) وتمنع إنشاء مستند تاني بنفس الـ uid.
+-// intent = اللي المستخدم اختاره في شاشة الدخول (customer | driver | merchant). null = جلسة مستعادة بدون اختيار => نوجّه بالدور المخزّن.
++// intent = اللي المستخدم اختاره قبل Google (customer | driver | merchant). null = جلسة مستعادة (لم يختر شيئًا في هذه الزيارة) => نوجّه بالدور المخزّن.
++// مبدأ الأمان: غياب الدور المختار في دخول جديد (fresh) أو دور غير معروف في Firestore **ليس تصريحًا** => رفض (fail-closed).
+ export const ROLE_LABELS = { customer: 'عميل', driver: 'كابتن', merchant: 'تاجر', admin: 'إدارة' };
++export const INTENT_ROLES = ['customer', 'driver', 'merchant'];
+ const INTENT_AS = { customer: 'كعميل', driver: 'ككابتن', merchant: 'كتاجر' };
++
++// نصوص شاشة الدخول لكل دور (تُعرض بعد اختيار نوع الحساب)
++export const ROLE_UI = {
++  customer: { title: 'الدخول كعميل', note: 'اطلب من متاجر المنايف وتابع طلباتك ومشاويرك.' },
++  merchant: { title: 'الدخول كتاجر', note: 'بعد التسجيل تُراجَع بيانات متجرك من الإدارة قبل التفعيل.' },
++  driver: { title: 'الدخول ككابتن توصيل', note: 'بعد التسجيل تُراجَع بياناتك من الإدارة قبل التفعيل.' },
++};
++
++export const MSG_USER_LOAD_FAILED = 'تعذّر تحميل بيانات حسابك. تأكد من الاتصال ثم اضغط «إعادة المحاولة».';
++export const MSG_INVALID_ROLE = 'بيانات حسابك غير مكتملة أو غير صالحة، ولا يمكن فتح أي لوحة الآن. تواصل مع الدعم لمراجعة الحساب.';
++export const MSG_INTENT_MISSING = 'لم نتمكن من تحديد نوع الحساب الذي اخترته. اختر نوع الحساب ثم سجّل الدخول مرة أخرى.';
++export const MSG_ROLE_REQUIRED = 'اختر نوع الحساب أولًا (عميل أو تاجر أو كابتن).';
++
++// رسالة التعارض. لا نكشف شيئًا عن حساب الإدارة (نص عام) - صاحب الحساب الحقيقي فقط هو اللي وصل لهنا بعد Google.
+ export function roleIntentConflict(intent, role) {
+-  if (!intent || !role || !INTENT_AS[intent] || !ROLE_LABELS[role]) return null;
++  if (!INTENT_AS[intent]) return null;
++  if (!ROLE_LABELS[role]) return null; // الدور غير المعروف يعالجه evaluateRoleGate (deny) - مش تصريح
+   if (role === intent) return null;
+-  // حساب الإدارة بيدخل من زر الدخول الرئيسي (بدون زر ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
++  // حساب الإدارة بيدخل من زر "عميل" (بدون خيار ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
+   if (role === 'admin' && intent === 'customer') return null;
+-  return `هذا البريد الإلكتروني مستخدم بالفعل لحساب ${ROLE_LABELS[role]} في MATLABK. لا يمكن استخدامه ${INTENT_AS[intent]}. يرجى استخدام بريد إلكتروني آخر.`;
++  const registered = role === 'admin' ? 'بحساب آخر في MATLABK' : `كحساب ${ROLE_LABELS[role]}`;
++  return `هذا البريد الإلكتروني مسجّل بالفعل ${registered}. لاستخدام MATLABK ${INTENT_AS[intent]}، يُرجى تسجيل الدخول ببريد Google آخر.`;
++}
++
++// قرار البوابة بعد تأكيد Firebase للجلسة وقراءة users/{uid} (دالة نقية - مصدر القرار الوحيد قبل فتح أي لوحة):
++//  register: لا يوجد مستند مستخدم (حساب جديد)  |  allow: يُوجَّه حسب الدور المخزّن
++//  reject: تعارض دور (رسالة + خروج، الرجوع لشاشة الدخول بنفس الدور)  |  deny: حالة غير آمنة (رسالة + خروج)
++export function evaluateRoleGate({ intent = null, fresh = false, exists, role }) {
++  if (!exists) return { action: 'register' };
++  if (!ROLE_LABELS[role]) return { action: 'deny', reason: 'invalid-role', message: MSG_INVALID_ROLE };
++  if (fresh && !INTENT_ROLES.includes(intent)) return { action: 'deny', reason: 'intent-missing', message: MSG_INTENT_MISSING };
++  const msg = roleIntentConflict(intent, role);
++  if (msg) return { action: 'reject', reason: 'role-mismatch', message: msg };
++  return { action: 'allow' };
++}
++
++// ===== حفظ الدور المختار (sessionStorage = للنجاة من إعادة تحميل الصفحة فقط، مش مصدر صلاحيات) =====
++export const INTENT_TTL_MS = 10 * 60 * 1000;
++export function encodeIntent(type, now = Date.now()) {
++  return INTENT_ROLES.includes(type) ? JSON.stringify({ t: type, ts: now }) : null;
++}
++export function decodeIntent(raw, now = Date.now()) {
++  if (typeof raw !== 'string' || !raw) return null;
++  let o; try { o = JSON.parse(raw); } catch (e) { return null; }
++  if (!o || !INTENT_ROLES.includes(o.t)) return null;
++  const age = now - Number(o.ts);
++  return Number.isFinite(age) && age >= 0 && age <= INTENT_TTL_MS ? o.t : null;
+ }
+diff -ruN orig/js/auth.js proj/js/auth.js
+--- orig/js/auth.js	2026-10-08 09:21:27.000000000 +0000
++++ proj/js/auth.js	2026-10-09 21:20:11.288249932 +0000
+@@ -1,12 +1,31 @@
+ // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
+ 
+ import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc } from './firebase.js';
+-import { OFFLINE_ERROR, SESSION_NOT_READY, describeAuthError, isRedirectPendingValid, roleIntentConflict } from './auth-flow.js';
++import { INTENT_ROLES, INTENT_TTL_MS, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
+ import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
+ import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
+ 
+-export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // UI hint فقط (sessionStorage) - مش مصدر صلاحيات
+-export function takeEntryType() { try { const t = sessionStorage.getItem(ENTRY_TYPE_KEY); sessionStorage.removeItem(ENTRY_TYPE_KEY); return ['customer','driver','merchant'].includes(t) ? t : null; } catch(e) { return null; } }
++export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // الدور المختار قبل دخول Google، مخزّن مؤقتًا في sessionStorage لنجاة إعادة التحميل فقط - مش مصدر صلاحيات
++// الدور المختار يُحفظ في الذاكرة (مسار popup) + sessionStorage (مسار redirect/إعادة تحميل) ويُستهلك مرة واحدة في بوابة الدور.
++let _pendingIntent = null; // { type, ts }
++let _loginInFlight = false; // true من لحظة الضغط على Google حتى تأكيد Firebase للجلسة (يميّز الدخول الجديد عن الجلسة المستعادة)
++export function setEntryIntent(type) {
++  const raw = encodeIntent(type); if (!raw) return false;
++  _pendingIntent = { type, ts: Date.now() };
++  try { sessionStorage.setItem(ENTRY_TYPE_KEY, raw); } catch(e) {}
++  return true;
++}
++export function peekEntryType() {
++  if (_pendingIntent && Date.now() - _pendingIntent.ts <= INTENT_TTL_MS) return _pendingIntent.type;
++  try { return decodeIntent(sessionStorage.getItem(ENTRY_TYPE_KEY)); } catch(e) { return null; }
++}
++export function clearEntryIntent() { _pendingIntent = null; _loginInFlight = false; try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {} }
++export function takeEntryType() { const t = peekEntryType(); clearEntryIntent(); return t; }
++// بيتنادى أول حاجة في onAuthStateChanged(user): يلتقط (الدور المختار + هل ده دخول جديد؟) ويصفّر الحالة المعلّقة.
++export function captureLoginIntent() {
++  const fresh = _loginInFlight || hasRedirectPending() || peekEntryType() !== null;
++  return { intent: takeEntryType(), fresh };
++}
+ import { clearAllListeners, setLoad, showScreen, showToast } from './utils.js';
+ import { getLocation, loadDriverData, startGPS } from './driver.js';
+ import { loadAdminData } from './admin.js';
+@@ -37,19 +56,11 @@
+ function authLockEnd() { _authOpInProgress = false; }
+ 
+ // ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
+-const LOGIN_BUTTONS = {
+-  customer: { btn: 'lg-google', label: 'lg-google-label', text: 'الدخول كعميل باستخدام Google' },
+-  driver: { btn: 'lg-driver', label: 'lg-driver-label', text: 'دخول الكابتن' },
+-  merchant: { btn: 'lg-merchant', label: 'lg-merchant-label', text: 'دخول التاجر' },
+-};
+ function setLoginBusy(on, label) {
+-  const active = LOGIN_BUTTONS[window.selectedType] || LOGIN_BUTTONS.customer;
+-  for (const k of Object.keys(LOGIN_BUTTONS)) {
+-    const c = LOGIN_BUTTONS[k]; const b = document.getElementById(c.btn); if (!b) continue;
+-    const isActive = on && c === active;
+-    b.disabled = on; b.setAttribute('aria-busy', isActive ? 'true' : 'false'); b.classList.toggle('is-loading', isActive);
+-    const l = document.getElementById(c.label); if (l) l.textContent = isActive ? (label || 'جاري فتح Google…') : c.text;
+-  }
++  const b = document.getElementById('lg-google'); if (!b) return;
++  b.disabled = on; b.setAttribute('aria-busy', on ? 'true' : 'false'); b.classList.toggle('is-loading', !!on);
++  const l = document.getElementById('lg-google-label'); if (l) l.textContent = on ? (label || 'جاري فتح Google…') : 'المتابعة باستخدام Google';
++  for (const id of ['lg-back', 'lg-retry']) { const x = document.getElementById(id); if (x) x.disabled = !!on; }
+ }
+ function showAltLogin(on) { const el = document.getElementById('lg-alt'); if (el) el.hidden = !on; }
+ // بيتنادى من onAuthStateChanged (نجاح/فشل) ومن الخروج: يفك الزر والقفل - مفيش Loading عالق.
+@@ -57,9 +68,10 @@
+ const REDIRECT_PENDING_KEY = 'matlabk_redirect_pending'; // يُكتب قبل أي تحويل redirect، المسار البديل فقط
+ export function hasRedirectPending() { try { return isRedirectPendingValid(sessionStorage.getItem(REDIRECT_PENDING_KEY)); } catch(e) { return false; } }
+ export function clearRedirectPending() { try { sessionStorage.removeItem(REDIRECT_PENDING_KEY); } catch(e) {} }
+-export function showLoginError(msg) {
+-  const e = document.getElementById('err-msg'); if (!e) return;
+-  e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none';
++export function showLoginError(msg, { retry = false } = {}) {
++  // نفس الرسالة في شاشة الدخول والصفحة الرئيسية (اللي ظاهرة منهم هي اللي يشوفها المستخدم) - مفيش رسالة تضيع.
++  for (const id of ['err-msg', 'home-err']) { const e = document.getElementById(id); if (e) { e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none'; } }
++  for (const id of ['lg-retry', 'home-retry']) { const r = document.getElementById(id); if (r) r.hidden = !(msg && retry); }
+ }
+ // الرجوع للصفحة بزر Back بعد تحويل Google (bfcache) لازم يفك الزر والقفل
+ window.addEventListener('pageshow', (ev) => { if (ev.persisted) { setLoginBusy(false); authLockEnd(); } });
+@@ -76,20 +88,24 @@
+ // والمتصفحات الحديثة بتحجب تخزين الطرف الثالث => signInWithRedirect بيرجع بدون جلسة (نتيجة فاضية بدون خطأ). الـ Popup مش بيعتمد على كده.
+ // مهم: signInWithPopup لازم تتنادى في نفس الـ click handler قبل أي await عشان المتصفح ما يحجبش النافذة.
+ export async function loginGoogle(type) {
+-  // type: 'customer' | 'driver' | 'merchant' (الزر اللي ضغطه المستخدم). مفيش حالة قديمة: كل ضغطة بتحدد النوع من جديد.
+-  window.selectedType = type === 'driver' || type === 'merchant' ? type : 'customer';
++  // النوع (عميل أو كابتن أو تاجر). لو مفيش نوع صالح (لا وسيط ولا اختيار سابق) => لا نفتح Google ولا نفترض "عميل": نرجّع المستخدم لاختيار نوع الحساب.
++  const role = INTENT_ROLES.includes(type) ? type : window.selectedType;
++  if (!INTENT_ROLES.includes(role)) { openRolePick(); showLoginError(MSG_ROLE_REQUIRED); return; }
+   if (!authLockStart()) return; // منع الضغط المتكرر
++  window.selectedType = role;
+   showLoginError(''); showAltLogin(false);
+   if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
+   setLoginBusy(true, 'جاري فتح Google…');
+-  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType); } catch(e) {}
++  setEntryIntent(role); _loginInFlight = true; // الدور المختار يُحفظ قبل أي عملية Google وبشكل متزامن قبل أول انتظار
+   try {
+     const cred = await signInWithPopup(auth, gProvider);
++    // لو مستمع الجلسة (onAuthStateChanged) سبق والتقط الاختيار وعالج هذا الدخول، لا نمرّر نفس الدخول على البوابة مرة تانية
++    // (مرة تانية بدون الدور المختار كانت هتعامله كجلسة مستعادة وتفتح لوحة الدور الفعلي بعد الرفض).
++    if (!_loginInFlight) return;
+     if (window.CU && cred?.user && window.CU.uid === cred.user.uid) {
+-      // نفس المستخدم كان داخل بالفعل (مفيش onAuthStateChanged جديد): نطبّق فحص الدور هنا بنفسنا.
++      // نفس المستخدم كان داخل بالفعل (مفيش onAuthStateChanged جديد): نمرّر على نفس البوابة (قراءة طازجة من Firestore + فحص الدور).
+       resetLoginState();
+-      const msg = roleIntentConflict(takeEntryType(), window.CUD?.role);
+-      if (msg) await rejectRoleMismatch(msg); else routeUser();
++      await handleSignedIn(cred.user, captureLoginIntent());
+       return;
+     }
+     // الدخول الفعلي يؤكده onAuthStateChanged فقط (هو اللي يوجّه ويفك الزر). لو لسه ماوصلش نغيّر الوصف ونراقب.
+@@ -98,7 +114,7 @@
+       setTimeout(() => { if (!window.CU) { resetLoginState(); showLoginError(SESSION_NOT_READY); } }, 15000);
+     }
+   } catch(e) {
+-    try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(_) {}
++    clearEntryIntent();
+     resetLoginState();
+     const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
+     if (!d.silent) showLoginError(d.message);
+@@ -107,9 +123,28 @@
+   }
+ }
+ 
+-// الحساب مرتبط بدور مختلف عن اللي اختاره المستخدم: نعرض الرسالة ونسجّل الخروج (بدون مسح أي بيانات) ولا نفتح واجهة الدور التاني.
+-export async function rejectRoleMismatch(message) {
++// ===== الصفحة الرئيسية -> اختيار نوع الحساب -> شاشة الدخول (Google) =====
++export function openRolePick() {
++  showLoginError(''); showAltLogin(false); showScreen('screen-role-pick');
++}
++export function openLogin(type) {
++  if (!INTENT_ROLES.includes(type)) { openRolePick(); return; }
++  window.selectedType = type; // UI فقط - القرار الفعلي في evaluateRoleGate من Firestore
++  const ui = ROLE_UI[type];
++  const t = document.getElementById('lg-role-title'); if (t) t.textContent = ui.title;
++  const n = document.getElementById('lg-role-note'); if (n) n.textContent = ui.note;
++  const card = document.getElementById('screen-login'); if (card) card.setAttribute('data-role', type);
++  setLoginBusy(false); showLoginError(''); showAltLogin(false);
++  showScreen('screen-login');
++}
++export function pickRole(type) { openLogin(type); }
++
++// الحساب مرتبط بدور مختلف (أو حالة غير آمنة): نسجّل الخروج فعليًا (بدون مسح أي بيانات دائمة) ونعرض الرسالة
++// where: 'login' (نفس شاشة الدور المختار + Google لحساب آخر) | 'pick' (اختيار النوع من جديد) | 'home'
++export async function rejectRoleMismatch(message, { where = 'home', intent = null } = {}) {
+   await doLogout();
++  if (where === 'login' && INTENT_ROLES.includes(intent)) openLogin(intent);
++  else if (where === 'pick') openRolePick();
+   showLoginError(message);
+ }
+ 
+@@ -120,7 +155,9 @@
+   showLoginError(''); showAltLogin(false);
+   if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
+   setLoginBusy(true, 'جاري التحويل إلى Google…');
+-  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); sessionStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now())); } catch(e) {}
++  if (!INTENT_ROLES.includes(window.selectedType)) { resetLoginState(); openRolePick(); showLoginError(MSG_ROLE_REQUIRED); return; }
++  setEntryIntent(window.selectedType); _loginInFlight = true;
++  try { sessionStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now())); } catch(e) {}
+   try {
+     await signInWithRedirect(auth, gProvider);
+   } catch(e) {
+@@ -140,11 +177,11 @@
+   // صراحة هنا وإلا ممكن تفضل عالقة ظاهرة فوق شاشة الدخول بعد تسجيل الخروج.
+   const cd = document.getElementById('screen-cust-detail'); if (cd) cd.style.display = 'none';
+   // تنظيف حالة المستخدم السابق (تبديل حسابات Google): لا يبقى أي دور/حالة/مسودة من حساب سابق.
+-  try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {}
++  clearEntryIntent(); _lastAttempt = null; // الدور المختار القديم لا يبقى عالقًا بعد الخروج
+   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
+-  window.CUD = null; window.uploadedDocs = {};
++  window.CUD = null; window.CU = null; window.uploadedDocs = {};
+   try { await signOut(auth); } catch(e) {}
+-  window.selectedType = 'customer'; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
++  window.selectedType = null; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
+   showScreen('screen-entry');
+ }
+ 
+@@ -173,8 +210,8 @@
+     // بدل ما نكرر الكتابة أو نغيّر دور موجود بالفعل.
+     const existing = await getDoc(doc(db,'users',user.uid));
+     if (existing.exists()) {
+-      window.CUD = existing.data();
+-      routeUser();
++      // المستند اتعمل بالفعل (تاب تاني/Retry): نعدّي على نفس بوابة الدور بدل التوجيه المباشر (لا تغيير دور ولا فتح لوحة مختلفة).
++      await handleSignedIn(user, { intent: role, fresh: true });
+       return;
+     }
+     const data = {
+@@ -275,15 +312,59 @@
+ export function editMerchantProfile() { showScreen('screen-complete-merchant'); }
+ 
+ 
++// ===== بوابة الدور: تُنفَّذ بعد تأكيد Firebase للجلسة، وقبل تحميل أي بيانات خاصة بدور أو فتح أي لوحة =====
++// مسار واحد لكل حالات الدخول: popup / redirect / استعادة جلسة / نفس المستخدم داخل بالفعل.
++// attempt = { intent, fresh } من captureLoginIntent(). المصدر الوحيد للدور الفعلي: users/{uid} في Firestore.
++let _lastAttempt = null; // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
++export async function handleSignedIn(user, attempt = {}) {
++  const intent = attempt.intent || null, fresh = !!attempt.fresh;
++  window.CU = user; window.CUD = null; // لا لوحة تُفتح قبل ما الدور يتأكد
++  let data = null, exists = false, storeMissing = false;
++  try {
++    const ud = await getDoc(doc(db, 'users', user.uid));
++    exists = ud.exists(); data = exists ? ud.data() : null;
++    if (exists && data.role === 'merchant') storeMissing = !(await getDoc(doc(db, 'stores', user.uid))).exists();
++  } catch(e) {
++    // فشل القراءة (شبكة/صلاحيات): لا نخمّن الدور ولا نفتح لوحة. رسالة + إعادة محاولة بنفس الدور المختار.
++    console.error('Auth routing error (users read):', e);
++    _lastAttempt = { intent, fresh }; window.CUD = null;
++    hideLoading();
++    if (fresh && INTENT_ROLES.includes(intent)) openLogin(intent); else showScreen('screen-entry');
++    showLoginError(MSG_USER_LOAD_FAILED, { retry: true });
++    return;
++  }
++  _lastAttempt = null;
++  const gate = evaluateRoleGate({ intent, fresh, exists, role: data?.role });
++  if (gate.action === 'reject') { hideLoading(); await rejectRoleMismatch(gate.message, { where: 'login', intent }); return; }
++  if (gate.action === 'deny') { hideLoading(); await rejectRoleMismatch(gate.message, { where: gate.reason === 'intent-missing' ? 'pick' : 'home' }); return; }
++  hideLoading();
++  if (gate.action === 'register') {
++    // حساب جديد: الإنشاء الفعلي في completeRegistration() (الرقابة الفعلية في Rules). بدون دور مختار => شاشة اختيار الدور.
++    if (intent) completeRegistration(intent); else showScreen('screen-role-select');
++    return;
++  }
++  window.CUD = data;
++  // Resume Registration: تاجر عنده users/{uid} من غير stores/{uid} (تسجيل لم يكتمل) => يرجع لنفس الخطوة الناقصة.
++  if (data.role === 'merchant' && storeMissing) { showScreen('screen-complete-merchant'); return; }
++  routeUser();
++}
++export function retryLoadAccount() {
++  const u = auth.currentUser;
++  if (!u) { showLoginError(''); showScreen('screen-entry'); return; }
++  showLoginError('');
++  return handleSignedIn(u, _lastAttempt || {});
++}
++
+ // ===== ROUTING =====
+ export function routeUser() {
+-  const role = window.CUD?.role;
++  const target = resolveRoute(window.CUD);
++  // fail-closed: دور غائب/غير معروف (أو CUD لم يُحمَّل) لا يفتح أي لوحة، حتى لو اتنادى routeUser من مكان تاني.
++  if (target === 'unknown') { rejectRoleMismatch(MSG_INVALID_ROLE, { where: 'home' }); return; }
+   startNotifListener();
+   loadCategories();
+   loadBanners();
+   loadCoupons();
+   listenSettings();
+-  const target = resolveRoute(window.CUD);
+   // MATLABK: التوجيه من الحالة الفعلية (من Firestore) - بدون الوصول لأي Dashboard ثم المنع.
+   if (target === 'admin') { showScreen('screen-admin'); loadAdminData(); }
+   else if (target === 'driver-register') showScreen('screen-driver-register');
+diff -ruN orig/js/main.js proj/js/main.js
+--- orig/js/main.js	2026-10-08 09:21:41.000000000 +0000
++++ proj/js/main.js	2026-10-09 21:17:15.200830172 +0000
+@@ -2,7 +2,7 @@
+ // الواجهة تلاقيها، يجهّز PWA، ويستمع لحالة تسجيل الدخول في Firebase =====
+ 
+ import { db, auth, doc, getDoc, onAuthStateChanged, getRedirectResult } from './firebase.js';
+-import { roleIntentConflict, signedOutOutcome } from './auth-flow.js';
++import { signedOutOutcome } from './auth-flow.js';
+ import { Logger, initOfflineHandling, callCurrentStore, callStore, closeModal, filterProds, openNotifs, openWA, setLoad, showErr, showScreen, showToast, waCurrentStore } from './utils.js';
+ import { markNotifRead, startNotifListener, registerNotificationsResets } from './notifications.js';
+ import { initAdminMap, initTrackMap, closeLocationPicker, locPickerConfirm, locPickerUseCurrent, locPickerOnSearchInput, locPickerOnCategoryClick, locPickerOnResultClick, recenterTrackMap, recenterRideStatusMap, toggleDriverMap, showDriverMapTab, registerMapsResets } from './maps.js';
+@@ -13,7 +13,7 @@
+ import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
+ import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
+ import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
+-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, takeEntryType, rejectRoleMismatch, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
++import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
+ import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
+ import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
+ import { renderIcons } from './icons.js';
+@@ -66,7 +66,7 @@
+   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
+   smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, loginGoogleRedirect, hideLoading,
+   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
+-  loginGoogle, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
++  loginGoogle, openRolePick, pickRole, openLogin, retryLoadAccount, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
+   syncToHubSpot, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
+   acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus,
+   sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer,
+@@ -111,6 +111,7 @@
+ 
+ onAuthStateChanged(auth, async user => {
+   if (user) {
++    const attempt = captureLoginIntent(); // الدور المختار + هل ده دخول جديد؟ (لازم قبل resetLoginState/clearRedirectPending)
+     resetLoginState(); clearRedirectPending(); // Firebase أكّد الجلسة فعليًا => نفك زر الدخول ونمسح علامة الـ redirect
+     // MATLABK: منع تسرّب حالة حساب لحساب تاني (تبديل حسابات Google): أي بيانات محلية مرتبطة بمستخدم سابق تتمسح.
+     try {
+@@ -120,38 +121,12 @@
+     } catch(e) {}
+     window.CUD = null;
+     window.CU = user;
+-    try {
+-      const ud = await getDoc(doc(db,'users',user.uid));
+-      const intent = takeEntryType(); // اللي اختاره المستخدم في شاشة الدخول (null لو جلسة مستعادة) - بيتقرا مرة واحدة
+-      if (ud.exists()) {
+-        // MATLABK: فصل الأدوار - الدور الفعلي من Firestore. لو مختلف عن اللي اختاره المستخدم: رسالة + خروج، ومفيش فتح لواجهة الدور التاني.
+-        const conflict = roleIntentConflict(intent, ud.data().role);
+-        if (conflict) { hideLoading(); await rejectRoleMismatch(conflict); return; }
+-        window.CUD = ud.data();
+-        // Resume Registration (Auth V2): تاجر عنده users/{uid} لكن من غير stores/{uid} - تسجيل
+-        // قديم لم يكتمل (كان ده الـ Bug المكتشف في مراجعة Google Sign-In). يُعامل كتسجيل غير
+-        // مكتمل، صفر مستند جديد بيتعمل، بس بيرجعله لنفس الخطوة الناقصة.
+-        if (window.CUD.role === 'merchant') {
+-          const sd = await getDoc(doc(db,'stores',user.uid));
+-          if (!sd.exists()) { hideLoading(); showScreen('screen-complete-merchant'); return; }
+-        }
+-        hideLoading();
+-        routeUser();
+-      } else {
+-        // Authentication Gateway (V2): الـ Gateway هنا مسؤول عن القراءة والتوجيه بس - صفر كتابة
+-        // Business Document من هنا لأي Provider (Email/Google/أي حاجة مستقبلية). أي مستخدم جديد
+-        // بيتوجه لشاشة اختيار الدور، والإنشاء الفعلي بيحصل في completeRegistration() (auth.js)
+-        // بس لحظة ما المستخدم يختار دوره فعليًا.
+-        hideLoading();
+-        // MATLABK: لو المستخدم اختار نوع الحساب من شاشة الدخول قبل Google، ننشئ حسابه مباشرة (الرقابة الفعلية في Rules).
+-        const entryType = intent;
+-        if (entryType) completeRegistration(entryType); else showScreen('screen-role-select');
+-      }
+-    } catch(e) {
++    // بوابة الدور المشتركة (auth.js): قراءة users/{uid} + مقارنة الدور المختار بالفعلي + fail-closed، قبل أي لوحة.
++    try { await handleSignedIn(user, attempt); }
++    catch(e) {
+       console.error('Auth routing error:', e);
+-      hideLoading();
+-      showToast(firebaseAuthErrorMessage(e), 'err');
+-      showScreen('screen-entry');
++      window.CUD = null; hideLoading();
++      showScreen('screen-entry'); showLoginError(firebaseAuthErrorMessage(e));
+     }
+   } else {
+     // MATLABK: "مفيش مستخدم" مش نهائي إلا بعد ما getRedirectResult يخلّص (منع race بين النتيجتين). لو كنا بادئين redirect نستنى أطول.
+@@ -161,7 +136,8 @@
+     if (out.action === 'ignore') return; // الجلسة اتأكدت فعليًا - الـ callback الخاص بالمستخدم هو اللي بيوجّه
+     window.CU = null; window.CUD = null;
+     hideLoading(); resetLoginState(); clearRedirectPending();
++    const keep = out.error ? peekEntryType() : null; clearEntryIntent();
++    if (keep) openLogin(keep); else showScreen('screen-entry');
+     if (out.error) showLoginError(out.error); // رجوع من Google بدون جلسة: رسالة واضحة بدل الرجوع الصامت لشاشة الدخول
+-    showScreen('screen-entry');
+   }
+ });
+diff -ruN orig/tests/auth-contract.test.mjs proj/tests/auth-contract.test.mjs
+--- orig/tests/auth-contract.test.mjs	2026-10-08 09:22:43.000000000 +0000
++++ proj/tests/auth-contract.test.mjs	2026-10-09 21:20:57.439461273 +0000
+@@ -25,14 +25,14 @@
+   assert.doesNotMatch(lg, /signInWithRedirect/);               // المسار الأساسي ما بيستخدمش redirect
+   const rd = a.slice(a.indexOf('export async function loginGoogleRedirect()')); assert.match(rd, /await signInWithRedirect\(auth, gProvider\)/); assert.match(rd, /REDIRECT_PENDING_KEY, String\(Date\.now\(\)\)/);
+   const m = R('js/main.js'); assert.match(m, /getRedirectResult\(auth\)/); assert.match(m, /onAuthStateChanged\(auth, async user =>/);
+-  const html = R('index.html'); assert.match(html, /onclick="loginGoogle\('customer'\)"/); assert.match(html, /الدخول كعميل باستخدام Google/);
++  const html = R('index.html'); assert.match(html, /id="lg-google"[^>]*onclick="loginGoogle\(\)"/); assert.match(html, /المتابعة باستخدام Google/);
+   assert.match(html, /id="lg-alt"[^>]*hidden[^>]*onclick="loginGoogleRedirect\(\)"/);
+ });
+ test('no race / no silent return: signed-out branch awaits redirect result, uses signedOutOutcome, resets UI, never leaves loading', () => {
+   const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
+   assert.match(h, /await withTimeout\(redirectSettled/); assert.match(h, /signedOutOutcome\(\{ currentUser: auth\.currentUser/); assert.match(h, /if \(out\.action === 'ignore'\) return;/);
+   assert.match(h, /hideLoading\(\); resetLoginState\(\); clearRedirectPending\(\);/); assert.match(h, /if \(out\.error\) showLoginError\(out\.error\)/);
+-  assert.match(h, /if \(user\) \{\s*resetLoginState\(\); clearRedirectPending\(\);/);   // نجاح فعلي => فك الزر
++  assert.match(h, /if \(user\) \{\s*const attempt = captureLoginIntent\(\);[^\n]*\n\s*resetLoginState\(\); clearRedirectPending\(\);/);   // نجاح فعلي => فك الزر
+   assert.match(m, /const redirectSettled = getRedirectResult\(auth\)\.catch/);                // النتيجة بتتستنّى مش بتتهمل
+   const a = R('js/auth.js'); assert.match(a, /SESSION_NOT_READY/); assert.match(a, /setTimeout\(\(\) => \{ if \(!window\.CU\)/); // لا loading عالق بعد نجاح popup
+ });
+@@ -41,16 +41,28 @@
+   assert.match(lo, /await signOut\(auth\)/); assert.match(lo, /resetLoginState\(\)/); assert.match(lo, /clearRedirectPending\(\)/);
+   const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export async function loginGoogleRedirect()')); assert.doesNotMatch(lg, /window\.CU\s*=[^=]/);
+ });
+-test('login screen (screen-entry): 3 clear entries (customer primary, captain, merchant), Google-only, no legacy UI', () => {
+-  const html = R('index.html'); const s = html.slice(html.indexOf('id="screen-entry"'), html.indexOf('id="screen-role-select"'));
+-  assert.doesNotMatch(s, /type="(email|password)"|auth-tab|lmail|lpass|login-btn|legacy-login|auth-register|role-btn|اختر دورك/);
+-  assert.doesNotMatch(html, /id="screen-auth"|id="screen-otp"|otp-email|otp-card/);
+-  for (const txt of ['MATLAB<span>K</span>', 'خدماتك أقرب إليك', 'توصيل • مشاوير • خدمات داخل المنايف', 'الدخول كعميل باستخدام Google', 'تسجيل سريع وآمن باستخدام حساب Google', 'دخول الكابتن', 'دخول التاجر', 'بمتابعتك، أنت توافق على شروط الاستخدام وسياسة الخصوصية.']) assert.ok(s.includes(txt), txt);
+-  assert.match(s, /id="lg-google"[^>]*onclick="loginGoogle\('customer'\)"/); assert.match(s, /id="lg-driver"[^>]*onclick="loginGoogle\('driver'\)"/); assert.match(s, /id="lg-merchant"[^>]*onclick="loginGoogle\('merchant'\)"/);
+-  assert.match(s, /<svg class="lg-g"/); assert.doesNotMatch(html, /Gmail|MATALBK|\bMova\b/i);
+-  assert.match(s, /id="err-msg"[^>]*role="alert"/); assert.doesNotMatch(s, /admin|الإدارة\s*<|لوحة الإدارة|دخول الإدارة/); // لا زر/نص إدارة ظاهر لغير الإدارة
++test('3 stages: home (screen-entry) -> role pick -> Google login screen; Google-only, no legacy UI', () => {
++  const html = R('index.html');
++  const home = html.slice(html.indexOf('id="screen-entry"'), html.indexOf('id="screen-role-pick"'));
++  const pick = html.slice(html.indexOf('id="screen-role-pick"'), html.indexOf('id="screen-login"'));
++  const login = html.slice(html.indexOf('id="screen-login"'), html.indexOf('id="screen-role-select"'));
++  assert.doesNotMatch(html, /type="(email|password)"|auth-tab|lmail|lpass|login-btn|legacy-login|auth-register|id="screen-auth"|id="screen-otp"|otp-email|otp-card/i); assert.doesNotMatch(html, /id="[^"]*apple|onclick="[^"]*apple/i); // لا زر Apple
++  // 1) الصفحة الرئيسية: هوية + خدمات + زر بدء، ولا زر Google ولا اختيار دور هنا
++  for (const t of ['MATLAB<span>K</span>', 'خدماتك أقرب إليك', 'توصيل الطلبات', 'المشاوير', 'خدمات محلية']) assert.ok(home.includes(t), t);
++  assert.match(home, /id="home-start"[^>]*onclick="openRolePick\(\)"/); assert.doesNotMatch(home, /loginGoogle|id="lg-google"/);
++  assert.match(home, /id="home-err"[^>]*role="alert"/);
++  // 2) اختيار النوع: ثلاث خيارات واضحة، كلها تحدد الدور قبل أي Google
++  for (const r of ['customer', 'merchant', 'driver']) assert.match(pick, new RegExp(`onclick="pickRole\\('${r}'\\)"`), r);
++  assert.equal([...pick.matchAll(/class="rp-card"/g)].length, 3); assert.doesNotMatch(pick, /loginGoogle/);
++  for (const t of ['الدخول كعميل', 'الدخول كتاجر', 'الدخول ككابتن توصيل']) assert.ok(pick.includes(t), t);
++  // 3) شاشة الدخول: زر Google واحد فقط (الدور من الحالة المحفوظة)، رسالة الخطأ داخل الشاشة، رجوع لتغيير النوع
++  assert.match(login, /id="lg-google"[^>]*onclick="loginGoogle\(\)"/); assert.equal([...login.matchAll(/loginGoogle\(/g)].length, 1);
++  assert.ok(login.includes('المتابعة باستخدام Google')); assert.match(login, /<svg class="lg-g"/);
++  assert.match(login, /id="err-msg"[^>]*role="alert"/); assert.match(login, /id="lg-back"[^>]*onclick="openRolePick\(\)"/);
++  assert.match(login, /id="lg-retry"[^>]*hidden[^>]*onclick="retryLoadAccount\(\)"/);
++  assert.doesNotMatch(home + pick + login, /admin|لوحة الإدارة|دخول الإدارة/); // لا زر/نص إدارة ظاهر لغير الإدارة
+   const m = R('js/main.js'); const win = m.slice(m.indexOf('Object.assign(window'), m.indexOf('});', m.indexOf('Object.assign(window')));
+-  for (const fnName of new Set([...s.matchAll(/onclick="([A-Za-z]+)\(/g)].map((x) => x[1]))) assert.match(win, new RegExp('\\b' + fnName + '\\b'), fnName); // لا dead handlers
++  for (const fnName of new Set([...(home + pick + login).matchAll(/onclick="([A-Za-z]+)\(/g)].map((x) => x[1]).filter((x) => x !== 'showScreen'))) assert.match(win, new RegExp('\\b' + fnName + '\\b'), fnName); // لا dead handlers
+ });
+ test('login UX: loading blocks double-click, errors inline (no Toast), offline guard, bfcache reset', () => {
+   const a = R('js/auth.js');
+@@ -58,17 +70,28 @@
+   assert.match(a, /navigator\.onLine === false/); assert.match(a, /pageshow/); assert.match(a, /ev\.persisted/);
+   assert.doesNotMatch(a, /showToast\(firebaseAuthErrorMessage/); assert.match(R('js/main.js'), /showLoginError\(firebaseAuthErrorMessage\(e\)\)/); assert.match(a, /describeAuthError/);
+ });
+-test('role/status flow untouched: partners never auto-activated; role check happens in main + same-uid path; logout intact', () => {
++test('role gate: intent saved before Google; one shared gate (evaluateRoleGate) for popup/redirect/restore/same-uid; fail-closed; logout intact', () => {
+   const a = R('js/auth.js'); assert.match(a, /status: role === 'customer' \? STATUS\.ACTIVE : STATUS\.INCOMPLETE/);
+-  assert.match(a, /window\.selectedType = type === 'driver' \|\| type === 'merchant' \? type : 'customer'/); assert.doesNotMatch(a, /pickEntryType|ENTRY_MODES/);
++  assert.doesNotMatch(a, /pickEntryType|ENTRY_MODES/);
++  // 1) الدور يُحفظ قبل Google وبشكل متزامن (قبل أول await)، ولا افتراض "عميل" عند غياب الاختيار
++  const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export function openRolePick'));
++  assert.ok(lg.indexOf('setEntryIntent(role)') > 0 && lg.indexOf('setEntryIntent(role)') < lg.indexOf('await signInWithPopup('));
++  assert.match(lg, /if \(!INTENT_ROLES\.includes\(role\)\) \{ openRolePick\(\); showLoginError\(MSG_ROLE_REQUIRED\); return; \}/);
++  assert.doesNotMatch(lg, /: 'customer'/);
++  // 2) نفس المستخدم داخل بالفعل => نفس البوابة (قراءة طازجة)
++  assert.match(lg, /await handleSignedIn\(cred\.user, captureLoginIntent\(\)\)/);
++  // 3) main.js: بوابة واحدة، والتقاط الدور قبل أي تصفير، ولا توجيه مباشر هناك
+   const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
+-  assert.match(h, /const intent = takeEntryType\(\)/); assert.match(h, /roleIntentConflict\(intent, ud\.data\(\)\.role\)/);
+-  assert.match(h, /if \(conflict\) \{ hideLoading\(\); await rejectRoleMismatch\(conflict\); return; \}/);
+-  assert.ok(h.indexOf('roleIntentConflict(') < h.indexOf('window.CUD = ud.data()'), 'الفحص قبل تحميل الدور في CUD وقبل routeUser');
+-  assert.match(h, /const entryType = intent;/);
+-  assert.match(a, /roleIntentConflict\(takeEntryType\(\), window\.CUD\?\.role\)/);   // نفس المستخدم داخل بالفعل
+-  assert.match(a, /export async function rejectRoleMismatch\(message\) \{\s*await doLogout\(\);\s*showLoginError\(message\);/);
+-  const lo = a.slice(a.indexOf('export async function doLogout()')); assert.match(lo, /await signOut\(auth\)/); assert.doesNotMatch(lo.slice(0, lo.indexOf('\n}\n')), /deleteDoc|setDoc|updateDoc/); // لا مسح بيانات
++  assert.match(h, /await handleSignedIn\(user, attempt\)/); assert.doesNotMatch(h, /routeUser\(\)|getDoc\(/);
++  // 4) البوابة: القراءة -> evaluateRoleGate -> (رفض | تسجيل | توجيه)؛ CUD لا يُحمَّل قبل القرار
++  const g = a.slice(a.indexOf('export async function handleSignedIn('), a.indexOf('export function retryLoadAccount'));
++  assert.ok(g.indexOf('evaluateRoleGate(') < g.indexOf('window.CUD = data;')); assert.ok(g.indexOf('window.CUD = data;') < g.indexOf('routeUser();'));
++  assert.match(g, /window\.CU = user; window\.CUD = null;/); assert.match(g, /MSG_USER_LOAD_FAILED, \{ retry: true \}/);
++  // 5) routeUser fail-closed قبل تحميل أي بيانات
++  const ru = a.slice(a.indexOf('export function routeUser()'), a.indexOf('// MATLABK: التوجيه من الحالة الفعلية'));
++  assert.match(ru, /target === 'unknown'\) \{ rejectRoleMismatch\(MSG_INVALID_ROLE/); assert.ok(ru.indexOf("'unknown'") < ru.indexOf('startNotifListener()'));
++  assert.match(a, /export async function rejectRoleMismatch\(message, \{ where = 'home', intent = null \} = \{\}\) \{\s*await doLogout\(\);/);
++  const lo = a.slice(a.indexOf('export async function doLogout()')); assert.match(lo, /await signOut\(auth\)/); assert.match(lo, /clearEntryIntent\(\)/); assert.doesNotMatch(lo.slice(0, lo.indexOf('\n}\n')), /deleteDoc|setDoc|updateDoc/); // لا مسح بيانات
+ });
+ test('Firestore enforces roles independently of the UI: role immutable for self-updates; admin cannot be self-created; no second role doc per uid', () => {
+   const blk = rules.slice(rules.indexOf('match /users/{userId}'), rules.indexOf('match /stores/{storeId}'));
+@@ -156,7 +179,7 @@
+ test('driver presence write failure is surfaced, not swallowed', () => assert.match(R('js/driver.js'), /presence write failed/));
+ test('account switching: main.js resets per-user state when uid changes; logout clears drafts/CUD', () => {
+   const m = R('js/main.js'); assert.match(m, /matlabk_last_uid/); assert.match(m, /window\.CUD = null;\s*window\.CU = user/);
+-  const a = R('js/auth.js'); assert.match(a, /localStorage\.removeItem\('manayef_drv_draft'\)/); assert.match(a, /window\.CUD = null; window\.uploadedDocs = \{\}/);
++  const a = R('js/auth.js'); assert.match(a, /localStorage\.removeItem\('manayef_drv_draft'\)/); assert.match(a, /window\.CUD = null; window\.CU = null; window\.uploadedDocs = \{\}/);
+ });
+ test('rules: operational gates use role+status active (driver & merchant)', () => {
+   assert.match(rules, /function isApprovedMerchant\(\)[\s\S]{0,200}role', ''\) == 'merchant'[\s\S]{0,80}status', ''\) == 'active'/);
+diff -ruN orig/tests/auth-flow.test.mjs proj/tests/auth-flow.test.mjs
+--- orig/tests/auth-flow.test.mjs	2026-10-08 09:22:29.000000000 +0000
++++ proj/tests/auth-flow.test.mjs	2026-10-09 21:18:58.880820438 +0000
+@@ -59,24 +59,24 @@
+ import { roleIntentConflict, ROLE_LABELS } from '../js/auth-flow.js';
+ test('customer -> customer: يدخل طبيعي', () => assert.equal(roleIntentConflict('customer', 'customer'), null));
+ test('customer -> captain: رفض بالنص المطلوب', () => assert.equal(roleIntentConflict('driver', 'customer'),
+-  'هذا البريد الإلكتروني مستخدم بالفعل لحساب عميل في MATLABK. لا يمكن استخدامه ككابتن. يرجى استخدام بريد إلكتروني آخر.'));
++  'هذا البريد الإلكتروني مسجّل بالفعل كحساب عميل. لاستخدام MATLABK ككابتن، يُرجى تسجيل الدخول ببريد Google آخر.'));
+ test('customer -> merchant: رفض مع "حساب عميل"', () => assert.equal(roleIntentConflict('merchant', 'customer'),
+-  'هذا البريد الإلكتروني مستخدم بالفعل لحساب عميل في MATLABK. لا يمكن استخدامه كتاجر. يرجى استخدام بريد إلكتروني آخر.'));
++  'هذا البريد الإلكتروني مسجّل بالفعل كحساب عميل. لاستخدام MATLABK كتاجر، يُرجى تسجيل الدخول ببريد Google آخر.'));
+ test('captain -> customer/merchant و merchant -> customer/captain: كلها مرفوضة برسالة واضحة', () => {
+-  assert.match(roleIntentConflict('customer', 'driver'), /لحساب كابتن .* كعميل/); assert.match(roleIntentConflict('merchant', 'driver'), /لحساب كابتن .* كتاجر/);
+-  assert.match(roleIntentConflict('customer', 'merchant'), /لحساب تاجر .* كعميل/); assert.match(roleIntentConflict('driver', 'merchant'), /لحساب تاجر .* ككابتن/);
++  assert.match(roleIntentConflict('customer', 'driver'), /كحساب كابتن\. .* كعميل/); assert.match(roleIntentConflict('merchant', 'driver'), /كحساب كابتن\. .* كتاجر/);
++  assert.match(roleIntentConflict('customer', 'merchant'), /كحساب تاجر\. .* كعميل/); assert.match(roleIntentConflict('driver', 'merchant'), /كحساب تاجر\. .* ككابتن/);
+ });
+ test('نفس الدور دائمًا مسموح (customer/driver/merchant)', () => { for (const r of ['customer', 'driver', 'merchant']) assert.equal(roleIntentConflict(r, r), null, r); });
+ test('مصفوفة كاملة 3x3: لا يُسمح بأي تقاطع دور مختلف', () => {
+   const roles = ['customer', 'driver', 'merchant']; let blocked = 0;
+-  for (const intent of roles) for (const role of roles) { const r = roleIntentConflict(intent, role); if (intent === role) assert.equal(r, null); else { assert.ok(r && r.includes('لا يمكن استخدامه'), `${intent}/${role}`); blocked++; } }
++  for (const intent of roles) for (const role of roles) { const r = roleIntentConflict(intent, role); if (intent === role) assert.equal(r, null); else { assert.ok(r && r.includes('يُرجى تسجيل الدخول ببريد Google آخر'), `${intent}/${role}`); blocked++; } }
+   assert.equal(blocked, 6);
+ });
+ test('جلسة مستعادة بدون اختيار (intent=null) أو دور غير معروف => لا حظر (التوجيه بالدور المخزّن)', () => {
+   assert.equal(roleIntentConflict(null, 'driver'), null); assert.equal(roleIntentConflict(undefined, 'merchant'), null); assert.equal(roleIntentConflict('driver', undefined), null); assert.equal(roleIntentConflict('driver', 'weird'), null);
+ });
+ test('admin: يدخل من زر العميل الرئيسي فقط؛ مرفوض كـكابتن/تاجر؛ لا يوجد intent "admin" يمنح صلاحية', () => {
+-  assert.equal(roleIntentConflict('customer', 'admin'), null); assert.match(roleIntentConflict('driver', 'admin'), /حساب إدارة/); assert.match(roleIntentConflict('merchant', 'admin'), /حساب إدارة/);
++  assert.equal(roleIntentConflict('customer', 'admin'), null); for (const i of ['driver', 'merchant']) { const m = roleIntentConflict(i, 'admin'); assert.ok(m && m.includes('بحساب آخر') && !m.includes('إدارة') && !/admin/i.test(m), i); } // لا كشف لوجود حساب إدارة
+   assert.equal(roleIntentConflict('admin', 'customer'), null); // intent غير معروف يُتجاهل (لا يفتح شيئًا)
+   assert.ok(ROLE_LABELS.admin);
+ });
+diff -ruN orig/tests/helpers/env.mjs proj/tests/helpers/env.mjs
+--- orig/tests/helpers/env.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/helpers/env.mjs	2026-10-09 21:20:49.048005936 +0000
+@@ -0,0 +1,48 @@
++// بيئة المتصفح المحاكاة + حالة Firebase المحاكاة. كل اختبار يبدأ من reset() نظيف.
++import { register } from 'node:module';
++register('./loader.mjs', import.meta.url);
++
++const realSetTimeout = globalThis.setTimeout;
++globalThis.setTimeout = (f, ms, ...a) => { const t = realSetTimeout(f, ms, ...a); t?.unref?.(); return t; };
++globalThis.fetch = async () => ({ ok: true });
++
++const els = new Map();
++function el(id) {
++  if (!els.has(id)) els.set(id, { id, style: {}, hidden: false, disabled: false, textContent: '', attrs: {}, classes: new Set(),
++    classList: { add(c) { els.get(id).classes.add(c); }, remove(c) { els.get(id).classes.delete(c); }, toggle(c, on) { on ? els.get(id).classes.add(c) : els.get(id).classes.delete(c); }, contains(c) { return els.get(id).classes.has(c); } },
++    setAttribute(k, v) { els.get(id).attrs[k] = v; }, getAttribute(k) { return els.get(id).attrs[k]; } });
++  return els.get(id);
++}
++globalThis.document = { getElementById: el, querySelectorAll: () => [] };
++globalThis.window = globalThis; globalThis.addEventListener = () => {};
++const store = () => { let m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { if (store.broken) throw new Error('blocked'); m.set(k, String(v)); }, removeItem: (k) => m.delete(k), clear: () => m.clear() }; };
++globalThis.sessionStorage = store(); globalThis.localStorage = store();
++
++export const $ = (id) => el(id);
++export function reset() {
++  els.clear(); sessionStorage.clear(); localStorage.clear(); store.broken = false;
++  globalThis.__t = { users: {}, stores: {}, reads: [], writes: [], calls: [], screens: [], signOuts: 0, popupCalls: 0, redirectCalls: 0, failRead: false, currentUser: null, popup: null };
++  globalThis.CU = null; globalThis.CUD = null; globalThis.selectedType = null;
++  if (typeof A !== 'undefined') { A.resetLoginState(); A.clearEntryIntent(); A.clearRedirectPending(); } // حالة الموديول (القفل/الاختيار) لا تتسرب بين الاختبارات
++  return globalThis.__t;
++}
++export const T = () => globalThis.__t;
++export const breakSessionStorage = (on) => { store.broken = on; };
++
++const A = await import('../../js/auth.js');
++export { A };
++// نفس تسلسل main.js في onAuthStateChanged(user) - يتأكد منه اختبار عقد ثابت أنه مطابق للمصدر.
++export async function authStateChanged(user) {
++  T().currentUser = user;
++  const attempt = A.captureLoginIntent();
++  A.resetLoginState(); A.clearRedirectPending();
++  window.CUD = null; window.CU = user;
++  await A.handleSignedIn(user, attempt);
++}
++// popup يكتمل بنجاح للمستخدم المحدد ثم يطلق authStateChanged كما يفعل SDK (إلا لو كان نفس المستخدم داخلًا بالفعل).
++export function popupSucceeds(user) {
++  T().popup = async () => { const already = T().currentUser && T().currentUser.uid === user.uid; T().currentUser = user; if (!already) queueMicrotask(() => authStateChanged(user)); return { user }; };
++}
++export const settle = () => new Promise((r) => realSetTimeout(r, 15));
++export const DASHBOARDS = ['screen-customer', 'screen-driver', 'screen-merchant', 'screen-admin'];
++export const opened = (...ids) => ids.some((i) => T().screens.includes(i));
+diff -ruN orig/tests/helpers/loader.mjs proj/tests/helpers/loader.mjs
+--- orig/tests/helpers/loader.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/helpers/loader.mjs	2026-10-09 21:19:15.650315170 +0000
+@@ -0,0 +1,8 @@
++// loader: يحوّل استيرادات js/auth.js (Firebase + باقي الموديولات الثقيلة) إلى stubs محلية، فيتشغّل كود auth.js الحقيقي في Node.
++const STUBS = new URL('../stubs/', import.meta.url);
++const MAP = new Set(['firebase', 'utils', 'customer', 'driver', 'admin', 'notifications', 'merchant', 'orders', 'rides']);
++export async function resolve(specifier, context, next) {
++  const m = /^\.\/([a-z]+)\.js$/.exec(specifier);
++  if (m && MAP.has(m[1]) && /\/js\/auth\.js$/.test(context.parentURL || '')) return { url: new URL(m[1] + '.mjs', STUBS).href, shortCircuit: true };
++  return next(specifier, context);
++}
+diff -ruN orig/tests/package.json proj/tests/package.json
+--- orig/tests/package.json	2026-10-03 18:25:22.000000000 +0000
++++ proj/tests/package.json	2026-10-09 21:22:27.520715545 +0000
+@@ -4,7 +4,8 @@
+   "type": "module",
+   "scripts": {
+     "test": "firebase emulators:exec --config ../firebase.json --project go-elmanayef --only firestore \"node --test firestore.rules.test.mjs\"",
+-    "contract": "node --test schema-contract.test.mjs"
++    "contract": "node --test schema-contract.test.mjs",
++    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs"
+   },
+   "devDependencies": {
+     "@firebase/rules-unit-testing": "^3.0.0",
+diff -ruN orig/tests/role-gate-pure.test.mjs proj/tests/role-gate-pure.test.mjs
+--- orig/tests/role-gate-pure.test.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/role-gate-pure.test.mjs	2026-10-09 21:20:28.564226399 +0000
+@@ -0,0 +1,26 @@
++// node --test tests/role-gate-pure.test.mjs - منطق نقي: بوابة الدور + الدور المختار + resolveRoute fail-closed
++import { test } from 'node:test'; import assert from 'node:assert/strict';
++import { evaluateRoleGate, encodeIntent, decodeIntent, INTENT_TTL_MS, MSG_INTENT_MISSING, MSG_INVALID_ROLE } from '../js/auth-flow.js';
++import { resolveRoute } from '../js/account-state.js';
++test('gate: نفس الدور/جلسة مستعادة/admin من زر العميل => allow', () => {
++  for (const r of ['customer', 'driver', 'merchant']) { assert.equal(evaluateRoleGate({ intent: r, fresh: true, exists: true, role: r }).action, 'allow'); assert.equal(evaluateRoleGate({ intent: null, fresh: false, exists: true, role: r }).action, 'allow'); }
++  assert.equal(evaluateRoleGate({ intent: 'customer', fresh: true, exists: true, role: 'admin' }).action, 'allow');
++});
++test('gate: تعارض => reject بالرسالة؛ لا مستند => register', () => {
++  const g = evaluateRoleGate({ intent: 'merchant', fresh: true, exists: true, role: 'driver' }); assert.equal(g.action, 'reject'); assert.match(g.message, /كحساب كابتن.*كتاجر.*ببريد Google آخر/);
++  assert.equal(evaluateRoleGate({ intent: 'driver', fresh: true, exists: false }).action, 'register');
++});
++test('gate fail-closed: دور مفقود/غير معروف، أو دخول جديد بلا دور مختار => deny', () => {
++  for (const role of [undefined, null, '', 'weird', 'root']) assert.deepEqual(evaluateRoleGate({ intent: 'customer', fresh: true, exists: true, role }), { action: 'deny', reason: 'invalid-role', message: MSG_INVALID_ROLE });
++  for (const intent of [null, undefined, 'admin', 'x']) assert.deepEqual(evaluateRoleGate({ intent, fresh: true, exists: true, role: 'customer' }), { action: 'deny', reason: 'intent-missing', message: MSG_INTENT_MISSING });
++});
++test('intent: ترميز/فك + TTL + رفض القيم الفاسدة', () => {
++  const now = 1_000_000; assert.equal(decodeIntent(encodeIntent('driver', now), now + 1000), 'driver');
++  assert.equal(decodeIntent(encodeIntent('driver', now), now + INTENT_TTL_MS + 1), null); assert.equal(decodeIntent(encodeIntent('driver', now), now - 1), null);
++  assert.equal(encodeIntent('admin'), null); assert.equal(encodeIntent(undefined), null);
++  for (const bad of [null, '', 'driver', '{', '{"t":"admin","ts":1}', '{"t":"driver"}', '[]']) assert.equal(decodeIntent(bad, 5), null, String(bad));
++});
++test('resolveRoute fail-closed: null/دور مفقود/غير معروف => unknown (لا واجهة عميل ضمنية)', () => {
++  for (const u of [null, undefined, {}, { status: 'active' }, { role: 'weird', status: 'active', name: 'Al', phone: '01012345678' }]) assert.equal(resolveRoute(u), 'unknown');
++  assert.equal(resolveRoute({ role: 'customer', status: 'active', name: 'Al', phone: '01012345678' }), 'customer-home');
++});
+diff -ruN orig/tests/role-gate.test.mjs proj/tests/role-gate.test.mjs
+--- orig/tests/role-gate.test.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/role-gate.test.mjs	2026-10-09 21:20:28.564055011 +0000
+@@ -0,0 +1,196 @@
++// node --test tests/role-gate.test.mjs
++// اختبارات سلوكية: كود auth.js الحقيقي (handleSignedIn / loginGoogle / doLogout / routeUser / completeRegistration)
++// مع محاكاة Firebase والمتصفح (tests/stubs + helpers). مش اختبار Google حقيقي ولا Firestore Emulator.
++import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict';
++import { A, $, T, reset, authStateChanged, popupSucceeds, settle, DASHBOARDS, opened, breakSessionStorage } from './helpers/env.mjs';
++import { MSG_INTENT_MISSING, MSG_INVALID_ROLE, MSG_USER_LOAD_FAILED } from '../js/auth-flow.js';
++
++const USER = { uid: 'u1', email: 'a@x.com', displayName: 'A' };
++const CUSTOMER = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
++const DRIVER_ACTIVE = { role: 'driver', status: 'active', fullName: 'Drv', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } };
++const DRIVER_PENDING = { ...DRIVER_ACTIVE, status: 'pending' };
++const DRIVER_INCOMPLETE = { role: 'driver', status: 'incomplete' };
++const MERCHANT_ACTIVE = { role: 'merchant', status: 'active', name: 'M' };
++const MERCHANT_PENDING = { role: 'merchant', status: 'pending', name: 'M' };
++const ROLES = { customer: CUSTOMER, driver: DRIVER_ACTIVE, merchant: MERCHANT_ACTIVE };
++const DASH = { customer: 'screen-customer', driver: 'screen-driver', merchant: 'screen-merchant' };
++const errText = () => $('err-msg').textContent;
++beforeEach(() => reset());
++
++async function loginAs(intent, doc, extra = {}) {
++  const t = T(); t.users[USER.uid] = doc; if (doc.role === 'merchant') t.stores[USER.uid] = { status: doc.status };
++  A.openLogin(intent); popupSucceeds(USER);
++  await A.loginGoogle(); await settle();
++  return t;
++}
++
++// 1) عميل يدخل كعميل
++test('1. عميل يسجل الدخول كعميل => لوحة العميل فقط', async () => {
++  const t = await loginAs('customer', CUSTOMER);
++  assert.equal(t.screens.at(-1), 'screen-customer'); assert.equal(t.signOuts, 0); assert.ok(t.calls.includes('loadCustomerData')); assert.deepEqual(window.CUD, CUSTOMER);
++});
++
++// 2/3/4/5) كل التعارضات: 6 تقاطعات (عميل/كابتن/تاجر) - لا لوحة، خروج فعلي، رسالة بالدور الفعلي، لا كتابة في Firestore
++for (const [role, label] of [['customer', 'عميل'], ['driver', 'كابتن'], ['merchant', 'تاجر']]) {
++  for (const [intent, as] of [['customer', 'كعميل'], ['driver', 'ككابتن'], ['merchant', 'كتاجر']]) {
++    if (intent === role) continue;
++    test(`2-5. حساب ${label} يحاول الدخول ${as} => رفض + رسالة + خروج بدون فتح أي لوحة`, async () => {
++      const t = await loginAs(intent, ROLES[role]);
++      assert.equal(opened(...DASHBOARDS, 'screen-driver-register', 'screen-merchant-status', 'screen-complete-merchant', 'screen-complete-customer', 'screen-blocked'), false, 'لا شاشة دور تُفتح: ' + t.screens.join(','));
++      for (const c of ['loadCustomerData', 'loadDriverData', 'loadMerchantData', 'loadAdminData', 'startNotifListener', 'loadCategories', 'listenRideOffers']) assert.equal(t.calls.includes(c), false, c);
++      assert.equal(t.signOuts, 1); assert.equal(t.currentUser, null); assert.equal(window.CU?.uid ?? null, window.CU?.uid ?? null);
++      assert.equal(t.screens.at(-1), 'screen-login');
++      assert.equal(errText(), `هذا البريد الإلكتروني مسجّل بالفعل كحساب ${label}. لاستخدام MATLABK ${as}، يُرجى تسجيل الدخول ببريد Google آخر.`);
++      assert.equal(t.writes.length, 0, 'لا تغيير دور ولا مستند ثانٍ'); assert.deepEqual(t.users[USER.uid], ROLES[role]); assert.equal(Object.keys(t.users).length, 1);
++      assert.equal(window.CUD, null);
++    });
++  }
++}
++
++// 6) استعادة جلسة صحيحة (بدون اختيار) => لوحة الدور المخزّن مباشرة
++for (const role of ['customer', 'driver', 'merchant']) {
++  test(`6. استعادة جلسة ${role} => لوحته مباشرة بدون إعادة اختيار`, async () => {
++    const t = T(); t.users[USER.uid] = ROLES[role]; t.stores[USER.uid] = {};
++    await authStateChanged(USER);
++    assert.equal(t.screens.at(-1), DASH[role]); assert.equal(t.signOuts, 0);
++  });
++}
++test('6b. استعادة الجلسة تنتظر قراءة Firestore: لا لوحة قبل اكتمالها ولا تخمين دور', async () => {
++  const t = T(); t.users[USER.uid] = CUSTOMER; let release; t.readGate = new Promise((r) => { release = r; });
++  const p = authStateChanged(USER); await settle();
++  assert.equal(window.CUD, null); assert.equal(opened(...DASHBOARDS, 'screen-complete-customer'), false); assert.equal(t.calls.length, 0);
++  release(); await p; assert.equal(t.screens.at(-1), 'screen-customer');
++});
++
++// 7) خروج ثم العودة للبداية
++test('7. تسجيل الخروج: إنهاء الجلسة + الصفحة الرئيسية + مسح الحالة المعلّقة + عدم المساس ببيانات Firestore', async () => {
++  const t = await loginAs('customer', CUSTOMER);
++  A.setEntryIntent('driver'); await A.doLogout();
++  assert.equal(t.currentUser, null); assert.equal(t.signOuts, 1); assert.equal(t.screens.at(-1), 'screen-entry');
++  assert.equal(window.CUD, null); assert.equal(window.selectedType, null); assert.equal(sessionStorage.getItem('matlabk_entry_type'), null);
++  assert.deepEqual(t.users[USER.uid], CUSTOMER); assert.equal(t.writes.length, 0);
++  assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false });
++});
++
++// 8) الدور القديم لا يبقى عالقًا
++test('8a. بعد خروج: اختيار "كابتن" القديم لا يؤثر على جلسة عميل لاحقة', async () => {
++  await loginAs('driver', DRIVER_ACTIVE); // يدخل ككابتن فعلًا
++  await A.doLogout(); T().screens.length = 0; T().users[USER.uid] = CUSTOMER;
++  await authStateChanged(USER); // جلسة مستعادة كعميل بدون اختيار
++  assert.equal(T().screens.at(-1), 'screen-customer');
++});
++test('8b. إلغاء نافذة Google: الدور المختار يُمسح (لا يتسرب لدخول لاحق)', async () => {
++  T().users[USER.uid] = CUSTOMER; A.openLogin('driver');
++  T().popup = async () => { throw Object.assign(new Error('x'), { code: 'auth/popup-closed-by-user' }); };
++  await A.loginGoogle();
++  assert.equal(sessionStorage.getItem('matlabk_entry_type'), null); assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false });
++  assert.match(errText(), /تم إغلاق نافذة Google/); assert.equal($('lg-google').disabled, false);
++});
++test('8c. دور مختار منتهي الصلاحية (>10 دقائق) في تخزين الجلسة يُتجاهل', () => {
++  sessionStorage.setItem('matlabk_entry_type', JSON.stringify({ t: 'driver', ts: Date.now() - 11 * 60 * 1000 }));
++  assert.equal(A.peekEntryType(), null);
++});
++
++// 9) فشل قراءة users/{uid}
++test('9. فشل قراءة ملف المستخدم: رسالة + إعادة محاولة، بدون لوحة ولا تخمين دور؛ والإعادة تحتفظ بالدور المختار', async () => {
++  const t = T(); t.users[USER.uid] = CUSTOMER; t.failRead = true;
++  A.openLogin('driver'); popupSucceeds(USER); await A.loginGoogle(); await settle();
++  assert.equal(opened(...DASHBOARDS, 'screen-complete-customer'), false); assert.equal(window.CUD, null);
++  assert.equal(errText(), MSG_USER_LOAD_FAILED); assert.equal($('lg-retry').hidden, false); assert.equal(t.calls.includes('loadCustomerData'), false);
++  t.failRead = false; t.screens.length = 0; await A.retryLoadAccount(); // المختار كان كابتن والحساب عميل => رفض وليس دخول عميل
++  assert.equal(opened(...DASHBOARDS), false); assert.equal(t.signOuts, 1); assert.match(errText(), /مسجّل بالفعل كحساب عميل.*ككابتن/);
++});
++test('9b. فشل القراءة في جلسة مستعادة: رسالة في الصفحة الرئيسية بدون لوحة', async () => {
++  const t = T(); t.users[USER.uid] = CUSTOMER; t.failRead = true; await authStateChanged(USER);
++  assert.equal(t.screens.at(-1), 'screen-entry'); assert.equal($('home-err').textContent, MSG_USER_LOAD_FAILED); assert.equal($('home-retry').hidden, false);
++  assert.equal(opened(...DASHBOARDS), false);
++  t.failRead = false; await A.retryLoadAccount(); assert.equal(t.screens.at(-1), 'screen-customer');
++});
++
++// 10) حساب جديد لم يكتمل ملفه
++test('10a. حساب جديد كابتن => status incomplete + شاشة استكمال البيانات (لا لوحة تشغيل)', async () => {
++  const t = T(); A.openLogin('driver'); popupSucceeds(USER); await A.loginGoogle(); await settle();
++  const w = t.writes.find((x) => x.path === 'users/u1'); assert.equal(w.data.role, 'driver'); assert.equal(w.data.status, 'incomplete');
++  assert.equal(t.screens.at(-1), 'screen-driver-register'); assert.equal(opened(...DASHBOARDS), false);
++});
++test('10b. حساب جديد تاجر => incomplete + استكمال بيانات المتجر', async () => {
++  const t = T(); A.openLogin('merchant'); popupSucceeds(USER); await A.loginGoogle(); await settle();
++  assert.equal(t.writes.find((x) => x.path === 'users/u1').data.status, 'incomplete'); assert.equal(t.screens.at(-1), 'screen-complete-merchant'); assert.equal(opened(...DASHBOARDS), false);
++});
++test('10c. حساب جديد عميل بدون هاتف => شاشة استكمال العميل', async () => {
++  const t = T(); A.openLogin('customer'); popupSucceeds(USER); await A.loginGoogle(); await settle();
++  assert.equal(t.screens.at(-1), 'screen-complete-customer');
++});
++test('10d. جلسة مستعادة لحساب بلا مستند (تسجيل لم يكتمل) => شاشة اختيار الدور، لا لوحة', async () => {
++  await authStateChanged(USER); assert.equal(T().screens.at(-1), 'screen-role-select'); assert.equal(opened(...DASHBOARDS), false);
++});
++
++// 11) pending
++test('11. كابتن/تاجر pending أو incomplete => لا لوحة تشغيل', async () => {
++  for (const [doc, screen] of [[DRIVER_PENDING, 'screen-driver-register'], [DRIVER_INCOMPLETE, 'screen-driver-register'], [MERCHANT_PENDING, 'screen-merchant-status']]) {
++    reset(); const t = T(); t.users[USER.uid] = doc; t.stores[USER.uid] = {};
++    await authStateChanged(USER); assert.equal(t.screens.at(-1), screen, doc.role + '/' + doc.status); assert.equal(opened('screen-driver', 'screen-merchant'), false);
++    assert.equal(t.calls.includes('loadDriverData') || t.calls.includes('loadMerchantData'), false);
++  }
++});
++test('11b. نفس الدور + pending => يدخل مسار الدور (ليس رفضًا)', async () => {
++  const t = await loginAs('driver', DRIVER_PENDING); assert.equal(t.signOuts, 0); assert.equal(t.screens.at(-1), 'screen-driver-register');
++  reset(); const t2 = await loginAs('merchant', MERCHANT_PENDING); assert.equal(t2.signOuts, 0); assert.equal(t2.screens.at(-1), 'screen-merchant-status');
++});
++
++// 12) admin / fail-closed
++test('12a. لا يوجد اختيار admin: loginGoogle("admin") لا يفتح Google ولا يفترض عميلًا', async () => {
++  A.openRolePick(); window.selectedType = null; popupSucceeds(USER); await A.loginGoogle('admin');
++  assert.equal(T().popupCalls, 0); assert.equal(T().screens.at(-1), 'screen-role-pick'); assert.match(errText() || $('err-msg').textContent, /اختر نوع الحساب/);
++});
++test('12b. حقول ذاتية (isAdmin/approved) في مستند عميل لا تفتح لوحة الإدارة', async () => {
++  const t = T(); t.users[USER.uid] = { ...CUSTOMER, isAdmin: true, role2: 'admin', approved: true }; await authStateChanged(USER);
++  assert.equal(t.screens.at(-1), 'screen-customer'); assert.equal(t.calls.includes('loadAdminData'), false);
++});
++test('12c. مستند admin حقيقي: يدخل من زر العميل فقط، ومرفوض ككابتن/تاجر بدون كشف وجود حساب إدارة', async () => {
++  let t = await loginAs('customer', { role: 'admin', status: 'active' }); assert.equal(t.screens.at(-1), 'screen-admin'); assert.ok(t.calls.includes('loadAdminData'));
++  for (const intent of ['driver', 'merchant']) {
++    reset(); t = await loginAs(intent, { role: 'admin', status: 'active' });
++    assert.equal(t.calls.includes('loadAdminData'), false); assert.equal(t.signOuts, 1); assert.ok(!/إدارة|admin/i.test(errText()), errText());
++  }
++});
++test('12d. دور مفقود/غير معروف في Firestore => رفض وخروج، لا افتراض عميل (fail-closed)', async () => {
++  for (const bad of [{ status: 'active', name: 'x', phone: '01012345678' }, { role: 'weird', status: 'active' }, { role: '', status: 'active' }]) {
++    reset(); const t = await loginAs('customer', bad);
++    assert.equal(opened(...DASHBOARDS, 'screen-complete-customer'), false, JSON.stringify(bad)); assert.equal(t.signOuts, 1); assert.equal(errText() || $('home-err').textContent, MSG_INVALID_ROLE);
++  }
++});
++test('12e. routeUser نفسها fail-closed: CUD=null لا يفتح لوحة العميل', async () => {
++  const t = T(); window.CUD = null; A.routeUser(); await settle();
++  assert.equal(opened(...DASHBOARDS), false); assert.equal(t.calls.includes('loadCustomerData'), false); assert.equal(t.screens.at(-1), 'screen-entry');
++});
++test('12f. دخول جديد بلا دور مختار (تخزين مفقود بعد redirect) => رفض، لا توجيه بالدور المخزّن', async () => {
++  const t = T(); t.users[USER.uid] = DRIVER_ACTIVE; sessionStorage.setItem('matlabk_redirect_pending', String(Date.now()));
++  await authStateChanged(USER);
++  assert.equal(opened(...DASHBOARDS), false); assert.equal(t.signOuts, 1); assert.equal($('err-msg').textContent, MSG_INTENT_MISSING); assert.equal(t.screens.at(-1), 'screen-role-pick');
++});
++test('12g. sessionStorage معطّل (وضع خاص): الدور المختار يبقى في الذاكرة ويُطبَّق الفحص', async () => {
++  breakSessionStorage(true); const t = await loginAs('driver', CUSTOMER);
++  assert.equal(opened(...DASHBOARDS), false); assert.equal(t.signOuts, 1); assert.match(errText(), /كحساب عميل/);
++});
++test('12h. نفس المستخدم داخل بالفعل ويضغط دورًا مختلفًا => نفس الفحص (قراءة طازجة)، ولا لوحة', async () => {
++  const t = T(); t.users[USER.uid] = CUSTOMER; await authStateChanged(USER); t.screens.length = 0; t.calls.length = 0;
++  A.openLogin('merchant'); popupSucceeds(USER); await A.loginGoogle(); await settle();
++  assert.equal(opened(...DASHBOARDS), false); assert.equal(t.signOuts, 1); assert.match(errText(), /كحساب عميل.*كتاجر/);
++});
++test('12i. ضغط متكرر على Google أثناء عملية معلّقة => نافذة واحدة فقط', async () => {
++  const t = T(); let done; t.popup = () => new Promise((r) => { done = r; }); A.openLogin('customer');
++  const p1 = A.loginGoogle(); const p2 = A.loginGoogle(); await p2; assert.equal(t.popupCalls, 1); assert.equal($('lg-google').disabled, true);
++  done({ user: USER }); t.currentUser = USER; await p1;
++});
++
++test('13. مستمع main.js يطابق تسلسل الاختبار: التقاط الدور -> reset -> بوابة واحدة (لا توجيه مباشر)', async () => {
++  const { readFileSync } = await import('node:fs'); const m = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
++  const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
++  const i1 = h.indexOf('captureLoginIntent()'), i2 = h.indexOf('resetLoginState(); clearRedirectPending();'), i3 = h.indexOf('window.CU = user;'), i4 = h.indexOf('await handleSignedIn(user, attempt)');
++  assert.ok(i1 > 0 && i1 < i2 && i2 < i3 && i3 < i4);
++});
++test('14. بعد رفض الدور لا يعاد تمرير نفس الدخول على البوابة (سباق popup/المستمع) ولا تبقى جلسة CU', async () => {
++  const t = await loginAs('driver', CUSTOMER);
++  assert.equal(t.reads.filter((r) => r === 'users/u1').length, 1, 'قراءة واحدة فقط'); assert.equal(window.CU, null);
++});
+diff -ruN orig/tests/stubs/admin.mjs proj/tests/stubs/admin.mjs
+--- orig/tests/stubs/admin.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/admin.mjs	2026-10-09 21:19:15.657685020 +0000
+@@ -0,0 +1 @@
++export const loadAdminData = () => globalThis.__t.calls.push('loadAdminData');
+diff -ruN orig/tests/stubs/customer.mjs proj/tests/stubs/customer.mjs
+--- orig/tests/stubs/customer.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/customer.mjs	2026-10-09 21:19:15.656098135 +0000
+@@ -0,0 +1,2 @@
++const r = (n) => () => globalThis.__t.calls.push(n);
++export const loadBanners = r('loadBanners'), loadCategories = r('loadCategories'), loadCoupons = r('loadCoupons'), loadCustomerData = r('loadCustomerData'), loadProducts = r('loadProducts');
+diff -ruN orig/tests/stubs/driver.mjs proj/tests/stubs/driver.mjs
+--- orig/tests/stubs/driver.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/driver.mjs	2026-10-09 21:19:15.656867015 +0000
+@@ -0,0 +1,2 @@
++const r = (n) => () => globalThis.__t.calls.push(n);
++export const getLocation = r('getLocation'), loadDriverData = r('loadDriverData'), startGPS = r('startGPS');
+diff -ruN orig/tests/stubs/firebase.mjs proj/tests/stubs/firebase.mjs
+--- orig/tests/stubs/firebase.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/firebase.mjs	2026-10-09 21:20:28.563457767 +0000
+@@ -0,0 +1,18 @@
++const T = () => globalThis.__t;
++export const auth = { get currentUser() { return T().currentUser; } };
++export const db = {}; export const gProvider = {};
++export const doc = (_d, col, id) => ({ col, id });
++const tbl = (col) => (col === 'users' ? T().users : T().stores);
++export const getDoc = async (ref) => {
++  T().reads.push(ref.col + '/' + ref.id);
++  if (T().readGate) await T().readGate;
++  if (T().failRead) throw Object.assign(new Error('unavailable'), { code: 'unavailable' });
++  const d = tbl(ref.col)[ref.id]; return { exists: () => d !== undefined, data: () => d };
++};
++export const setDoc = async (ref, data) => { T().writes.push({ op: 'set', path: ref.col + '/' + ref.id, data }); tbl(ref.col)[ref.id] = data; };
++export const updateDoc = async (ref, data) => { T().writes.push({ op: 'update', path: ref.col + '/' + ref.id, data }); };
++export const runTransaction = async (_d, fn) => fn({ set: (ref, data) => setDoc(ref, data), update: (ref, data) => updateDoc(ref, data), get: async (ref) => getDoc(ref) });
++export const serverTimestamp = () => 'TS';
++export const signInWithPopup = async () => { T().popupCalls++; return T().popup(); };
++export const signInWithRedirect = async () => { T().redirectCalls++; };
++export const signOut = async () => { T().currentUser = null; T().signOuts++; };
+diff -ruN orig/tests/stubs/merchant.mjs proj/tests/stubs/merchant.mjs
+--- orig/tests/stubs/merchant.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/merchant.mjs	2026-10-09 21:19:15.659164793 +0000
+@@ -0,0 +1 @@
++export const loadMerchantData = () => globalThis.__t.calls.push('loadMerchantData');
+diff -ruN orig/tests/stubs/notifications.mjs proj/tests/stubs/notifications.mjs
+--- orig/tests/stubs/notifications.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/notifications.mjs	2026-10-09 21:19:15.658418370 +0000
+@@ -0,0 +1 @@
++export const startNotifListener = () => globalThis.__t.calls.push('startNotifListener');
+diff -ruN orig/tests/stubs/orders.mjs proj/tests/stubs/orders.mjs
+--- orig/tests/stubs/orders.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/orders.mjs	2026-10-09 21:19:15.659903343 +0000
+@@ -0,0 +1 @@
++export const listenSettings = () => globalThis.__t.calls.push('listenSettings');
+diff -ruN orig/tests/stubs/rides.mjs proj/tests/stubs/rides.mjs
+--- orig/tests/stubs/rides.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/rides.mjs	2026-10-09 21:19:15.660654671 +0000
+@@ -0,0 +1,2 @@
++const r = (n) => () => globalThis.__t.calls.push(n);
++export const listenRideOffers = r('listenRideOffers'), initDriverActiveRideListener = r('initDriverActiveRideListener');
+diff -ruN orig/tests/stubs/utils.mjs proj/tests/stubs/utils.mjs
+--- orig/tests/stubs/utils.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/stubs/utils.mjs	2026-10-09 21:19:15.655333487 +0000
+@@ -0,0 +1,4 @@
++const T = () => globalThis.__t;
++export const clearAllListeners = () => T().calls.push('clearAllListeners');
++export const setLoad = () => {}; export const showToast = () => {};
++export const showScreen = (id) => { T().screens.push(id); };
