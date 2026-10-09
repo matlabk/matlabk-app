@@ -963,3 +963,28 @@ textarea.inp{resize:vertical;font-family:var(--font-family)}
 @keyframes lgUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.lg-brand,.lg-action{animation:none}.lg-google{transition:none}.lg-spin{animation-duration:1.6s}}
 @media (max-height:640px){.lg-brand{margin-top:8px}.lg-action{margin-top:24px}.lg-mark{width:60px;height:60px;margin-bottom:12px}}
+
+/* ===== MATLABK: الصفحة الرئيسية + اختيار نوع الحساب + شاشة الدخول ===== */
+#screen-role-pick,#screen-login{background:#fff radial-gradient(70% 38% at 50% 0,var(--color-primary-soft),rgba(255,255,255,0));min-height:100vh;min-height:100dvh}
+#screen-role-pick.active,#screen-login.active{display:block}
+.hm-services{margin-top:clamp(20px,5vh,40px)}
+.hm-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.hm-list li{display:flex;align-items:center;gap:12px;background:#fff;border:1.5px solid var(--color-neutral-200);border-radius:14px;padding:12px 14px;text-align:right}
+.hm-ic{width:40px;height:40px;border-radius:12px;background:var(--color-primary-soft);color:var(--color-primary);display:flex;align-items:center;justify-content:center;flex:none}
+.hm-list strong{display:block;font-size:15px;font-weight:800;color:var(--color-text)}
+.hm-list small{display:block;font-size:13px;color:var(--color-text-secondary);margin-top:2px}
+.hm-cta{width:100%;min-height:56px;border:none;border-radius:14px;background:var(--color-primary);color:#fff;font-family:var(--font-family);font-size:16px;font-weight:800;cursor:pointer;box-shadow:0 10px 24px rgba(255,107,0,.25)}
+.hm-cta:active{transform:scale(.985)}
+.hm-cta:focus-visible,.rp-card:focus-visible,.lg-back:focus-visible{outline:3px solid rgba(255,107,0,.55);outline-offset:3px}
+.lg-back{min-height:44px;margin-top:10px;padding:0 6px;background:none;border:none;font-family:var(--font-family);font-size:14px;font-weight:800;color:var(--color-text);cursor:pointer;align-self:flex-start}
+.lg-back:disabled{opacity:.5;cursor:not-allowed}
+.rp-head{margin-top:clamp(12px,4vh,32px)}
+.rp-title{font-size:22px;font-weight:900;color:var(--color-text);text-align:center}
+.lg-role-title{margin-bottom:16px}
+.rp-list{margin-top:26px;display:grid;gap:12px}
+.rp-card{display:flex;align-items:center;gap:14px;width:100%;min-height:76px;padding:14px 16px;background:#fff;border:1.5px solid var(--color-neutral-200);border-radius:16px;font-family:var(--font-family);text-align:right;cursor:pointer;color:var(--color-text)}
+.rp-card:hover{border-color:var(--color-primary);background:var(--color-primary-soft)}
+.rp-card:active{transform:scale(.985)}
+.rp-ic{width:48px;height:48px;border-radius:14px;background:var(--color-primary-soft);color:var(--color-primary);display:flex;align-items:center;justify-content:center;flex:none}
+.rp-tx strong{display:block;font-size:16px;font-weight:800}
+.rp-tx small{display:block;font-size:13px;color:var(--color-text-secondary);margin-top:3px}
