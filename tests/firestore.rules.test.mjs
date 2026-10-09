@@ -291,3 +291,23 @@ test('customerDispatchOk still guards: customer cannot offer a ride to a pending
   await seedStates(); await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'rides', 'rc'), { customerId: 'custA', status: 'requested', driverId: null, pickup: { lat: 30, lng: 32 }, dropoff: { lat: 30.01, lng: 32.01 }, vehicleType: 'car', distanceKm: 2, pricingSnapshot: {}, candidateDriverIds: [], rejectedDriverIds: [], dispatchLog: [] }));
   await assertFails(updateDoc(doc(as('custA'), 'rides', 'rc'), { status: 'driver_offered', candidateDriverIds: ['drv_pending'], rejectedDriverIds: [], dispatchLog: [], offeredAt: serverTimestamp() }));
 });
+
+// ================= MATLABK role-auth-ux pass (NOT EXECUTED — emulator unavailable) =================
+test('captain can submit WITHOUT plateNumber / vehicleModel / vehicleColor, but not without vehicleType; oversize plate rejected', async () => {
+  await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'users', 'optDrv'), { role: 'driver', status: 'incomplete', name: 'N' }));
+  const me = doc(as('optDrv'), 'users', 'optDrv'); const base = drvSubmit(); delete base.plateNumber;
+  await assertFails(updateDoc(me, { ...base, vehicleType: '' }));                               // vehicleType ما زال إلزاميًا
+  await assertFails(updateDoc(me, { ...base, plateNumber: 'x'.repeat(31) }));                    // حد الطول
+  await assertFails(updateDoc(me, { ...base, status: 'active' }));                               // لا تفعيل ذاتي
+  await assertSucceeds(updateDoc(me, base));                                                     // بدون لوحة ومواصفات => pending
+});
+test('same uid cannot become another role: customer -> driver/merchant/admin updates and a second role document are denied', async () => {
+  for (const role of ['driver', 'merchant', 'admin']) await assertFails(updateDoc(doc(as('custA'), 'users', 'custA'), { role }));
+  await assertFails(setDoc(doc(as('custA'), 'users', 'custA'), { role: 'driver', status: 'incomplete' }));   // create على مستند موجود = update ممنوع
+});
+test('non-admin cannot read admin collections (orders of others / all users / auditLog)', async () => {
+  const { collection, getDocs } = await import('firebase/firestore');
+  await assertFails(getDocs(collection(as('custA'), 'users'))); await assertFails(getDocs(collection(as('custA'), 'auditLog')));
+  await assertFails(getDoc(doc(as('custB'), 'orders', 'o1')));
+  await assertSucceeds(getDoc(doc(as('admin'), 'orders', 'o1')));
+});

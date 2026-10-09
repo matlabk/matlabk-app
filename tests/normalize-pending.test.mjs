@@ -4,8 +4,12 @@ import { effectiveStatus, resolveRoute } from '../js/account-state.js';
 const fullDrv = { role: 'driver', status: 'pending', fullName: 'Ahmed Ali', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'motorcycle', plateNumber: 'A1', docsSubmitted: true, docs: { id: 'x' } };
 test('driver pending: complete -> keep; missing any required -> to_incomplete', () => {
   assert.equal(classify(fullDrv).action, 'keep');
-  for (const k of ['fullName', 'phone', 'nationalId', 'vehicleType', 'plateNumber', 'docsSubmitted', 'docs']) assert.equal(classify({ ...fullDrv, [k]: undefined }).action, 'to_incomplete', k);
+  for (const k of ['fullName', 'phone', 'nationalId', 'vehicleType', 'docsSubmitted', 'docs']) assert.equal(classify({ ...fullDrv, [k]: undefined }).action, 'to_incomplete', k);
   assert.equal(classify({ ...fullDrv, docs: {} }).action, 'to_incomplete'); assert.equal(classify({ ...fullDrv, nationalId: '123' }).action, 'to_incomplete');
+});
+test('plateNumber / vehicleModel / vehicleColor are OPTIONAL: application stays complete without them', () => {
+  for (const k of ['plateNumber', 'vehicleModel', 'vehicleColor']) { assert.equal(classify({ ...fullDrv, [k]: undefined }).action, 'keep', k); assert.equal(classify({ ...fullDrv, [k]: '' }).action, 'keep', k); }
+  assert.equal(effectiveStatus({ ...fullDrv, plateNumber: undefined }), 'pending');
 });
 test('merchant pending: needs valid store data', () => {
   const u = { role: 'merchant', status: 'pending' };

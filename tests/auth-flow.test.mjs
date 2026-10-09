@@ -54,3 +54,29 @@ test('سيناريو: زيارة عادية بلا جلسة => login بلا خط
 test('سيناريو: redirect رجع بخطأ Firebase محدد => نفس الخطأ يظهر (لا يُستبدل بعام)', async () => {
   const r = await simulate({ pending: true, redirectResolvesMs: 5, sdkUserAfterMs: null, redirectError: 'رسالة محددة' }); assert.equal(r.err, 'رسالة محددة'); assert.equal(r.screen, 'login');
 });
+
+// ================= فصل الأدوار (نفس حساب Google لا يُستخدم لدور مختلف) =================
+import { roleIntentConflict, ROLE_LABELS } from '../js/auth-flow.js';
+test('customer -> customer: يدخل طبيعي', () => assert.equal(roleIntentConflict('customer', 'customer'), null));
+test('customer -> captain: رفض بالنص المطلوب', () => assert.equal(roleIntentConflict('driver', 'customer'),
+  'هذا البريد الإلكتروني مسجّل بالفعل كحساب عميل. لاستخدام MATLABK ككابتن، يُرجى تسجيل الدخول ببريد Google آخر.'));
+test('customer -> merchant: رفض مع "حساب عميل"', () => assert.equal(roleIntentConflict('merchant', 'customer'),
+  'هذا البريد الإلكتروني مسجّل بالفعل كحساب عميل. لاستخدام MATLABK كتاجر، يُرجى تسجيل الدخول ببريد Google آخر.'));
+test('captain -> customer/merchant و merchant -> customer/captain: كلها مرفوضة برسالة واضحة', () => {
+  assert.match(roleIntentConflict('customer', 'driver'), /كحساب كابتن\. .* كعميل/); assert.match(roleIntentConflict('merchant', 'driver'), /كحساب كابتن\. .* كتاجر/);
+  assert.match(roleIntentConflict('customer', 'merchant'), /كحساب تاجر\. .* كعميل/); assert.match(roleIntentConflict('driver', 'merchant'), /كحساب تاجر\. .* ككابتن/);
+});
+test('نفس الدور دائمًا مسموح (customer/driver/merchant)', () => { for (const r of ['customer', 'driver', 'merchant']) assert.equal(roleIntentConflict(r, r), null, r); });
+test('مصفوفة كاملة 3x3: لا يُسمح بأي تقاطع دور مختلف', () => {
+  const roles = ['customer', 'driver', 'merchant']; let blocked = 0;
+  for (const intent of roles) for (const role of roles) { const r = roleIntentConflict(intent, role); if (intent === role) assert.equal(r, null); else { assert.ok(r && r.includes('يُرجى تسجيل الدخول ببريد Google آخر'), `${intent}/${role}`); blocked++; } }
+  assert.equal(blocked, 6);
+});
+test('جلسة مستعادة بدون اختيار (intent=null) أو دور غير معروف => لا حظر (التوجيه بالدور المخزّن)', () => {
+  assert.equal(roleIntentConflict(null, 'driver'), null); assert.equal(roleIntentConflict(undefined, 'merchant'), null); assert.equal(roleIntentConflict('driver', undefined), null); assert.equal(roleIntentConflict('driver', 'weird'), null);
+});
+test('admin: يدخل من زر العميل الرئيسي فقط؛ مرفوض كـكابتن/تاجر؛ لا يوجد intent "admin" يمنح صلاحية', () => {
+  assert.equal(roleIntentConflict('customer', 'admin'), null); for (const i of ['driver', 'merchant']) { const m = roleIntentConflict(i, 'admin'); assert.ok(m && m.includes('بحساب آخر') && !m.includes('إدارة') && !/admin/i.test(m), i); } // لا كشف لوجود حساب إدارة
+  assert.equal(roleIntentConflict('admin', 'customer'), null); // intent غير معروف يُتجاهل (لا يفتح شيئًا)
+  assert.ok(ROLE_LABELS.admin);
+});
