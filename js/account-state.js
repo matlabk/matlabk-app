@@ -37,6 +37,8 @@ export function resolveRoute(u, ctx = {}) {
     if (st === STATUS.PENDING || st === STATUS.REJECTED) return 'merchant-status';
     return 'merchant-complete'; // incomplete أو أي حالة غير معروفة = لا صلاحيات تشغيلية
   }
+  // fail-closed: أي دور غير معروف/غائب لا يفتح واجهة العميل ضمنيًا (كان يسقط هنا في customer).
+  if (u.role !== 'customer') return 'unknown';
   if (st === STATUS.BLOCKED || st === STATUS.DELETED) return 'blocked';
   return isCustomerProfileComplete(u) ? 'customer-home' : 'customer-complete';
 }

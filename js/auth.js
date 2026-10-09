@@ -1,12 +1,31 @@
 // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
 
 import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc } from './firebase.js';
-import { OFFLINE_ERROR, SESSION_NOT_READY, describeAuthError, isRedirectPendingValid, roleIntentConflict } from './auth-flow.js';
+import { INTENT_ROLES, INTENT_TTL_MS, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
 import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
 import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
 
-export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // UI hint فقط (sessionStorage) - مش مصدر صلاحيات
-export function takeEntryType() { try { const t = sessionStorage.getItem(ENTRY_TYPE_KEY); sessionStorage.removeItem(ENTRY_TYPE_KEY); return ['customer','driver','merchant'].includes(t) ? t : null; } catch(e) { return null; } }
+export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // الدور المختار قبل دخول Google، مخزّن مؤقتًا في sessionStorage لنجاة إعادة التحميل فقط - مش مصدر صلاحيات
+// الدور المختار يُحفظ في الذاكرة (مسار popup) + sessionStorage (مسار redirect/إعادة تحميل) ويُستهلك مرة واحدة في بوابة الدور.
+let _pendingIntent = null; // { type, ts }
+let _loginInFlight = false; // true من لحظة الضغط على Google حتى تأكيد Firebase للجلسة (يميّز الدخول الجديد عن الجلسة المستعادة)
+export function setEntryIntent(type) {
+  const raw = encodeIntent(type); if (!raw) return false;
+  _pendingIntent = { type, ts: Date.now() };
+  try { sessionStorage.setItem(ENTRY_TYPE_KEY, raw); } catch(e) {}
+  return true;
+}
+export function peekEntryType() {
+  if (_pendingIntent && Date.now() - _pendingIntent.ts <= INTENT_TTL_MS) return _pendingIntent.type;
+  try { return decodeIntent(sessionStorage.getItem(ENTRY_TYPE_KEY)); } catch(e) { return null; }
+}
+export function clearEntryIntent() { _pendingIntent = null; _loginInFlight = false; try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {} }
+export function takeEntryType() { const t = peekEntryType(); clearEntryIntent(); return t; }
+// بيتنادى أول حاجة في onAuthStateChanged(user): يلتقط (الدور المختار + هل ده دخول جديد؟) ويصفّر الحالة المعلّقة.
+export function captureLoginIntent() {
+  const fresh = _loginInFlight || hasRedirectPending() || peekEntryType() !== null;
+  return { intent: takeEntryType(), fresh };
+}
 import { clearAllListeners, setLoad, showScreen, showToast } from './utils.js';
 import { getLocation, loadDriverData, startGPS } from './driver.js';
 import { loadAdminData } from './admin.js';
@@ -37,19 +56,11 @@ function authLockStart() {
 function authLockEnd() { _authOpInProgress = false; }
 
 // ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
-const LOGIN_BUTTONS = {
-  customer: { btn: 'lg-google', label: 'lg-google-label', text: 'الدخول كعميل باستخدام Google' },
-  driver: { btn: 'lg-driver', label: 'lg-driver-label', text: 'دخول الكابتن' },
-  merchant: { btn: 'lg-merchant', label: 'lg-merchant-label', text: 'دخول التاجر' },
-};
 function setLoginBusy(on, label) {
-  const active = LOGIN_BUTTONS[window.selectedType] || LOGIN_BUTTONS.customer;
-  for (const k of Object.keys(LOGIN_BUTTONS)) {
-    const c = LOGIN_BUTTONS[k]; const b = document.getElementById(c.btn); if (!b) continue;
-    const isActive = on && c === active;
-    b.disabled = on; b.setAttribute('aria-busy', isActive ? 'true' : 'false'); b.classList.toggle('is-loading', isActive);
-    const l = document.getElementById(c.label); if (l) l.textContent = isActive ? (label || 'جاري فتح Google…') : c.text;
-  }
+  const b = document.getElementById('lg-google'); if (!b) return;
+  b.disabled = on; b.setAttribute('aria-busy', on ? 'true' : 'false'); b.classList.toggle('is-loading', !!on);
+  const l = document.getElementById('lg-google-label'); if (l) l.textContent = on ? (label || 'جاري فتح Google…') : 'المتابعة باستخدام Google';
+  for (const id of ['lg-back', 'lg-retry']) { const x = document.getElementById(id); if (x) x.disabled = !!on; }
 }
 function showAltLogin(on) { const el = document.getElementById('lg-alt'); if (el) el.hidden = !on; }
 // بيتنادى من onAuthStateChanged (نجاح/فشل) ومن الخروج: يفك الزر والقفل - مفيش Loading عالق.
@@ -57,9 +68,10 @@ export function resetLoginState() { setLoginBusy(false); authLockEnd(); }
 const REDIRECT_PENDING_KEY = 'matlabk_redirect_pending'; // يُكتب قبل أي تحويل redirect، المسار البديل فقط
 export function hasRedirectPending() { try { return isRedirectPendingValid(sessionStorage.getItem(REDIRECT_PENDING_KEY)); } catch(e) { return false; } }
 export function clearRedirectPending() { try { sessionStorage.removeItem(REDIRECT_PENDING_KEY); } catch(e) {} }
-export function showLoginError(msg) {
-  const e = document.getElementById('err-msg'); if (!e) return;
-  e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none';
+export function showLoginError(msg, { retry = false } = {}) {
+  // نفس الرسالة في شاشة الدخول والصفحة الرئيسية (اللي ظاهرة منهم هي اللي يشوفها المستخدم) - مفيش رسالة تضيع.
+  for (const id of ['err-msg', 'home-err']) { const e = document.getElementById(id); if (e) { e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none'; } }
+  for (const id of ['lg-retry', 'home-retry']) { const r = document.getElementById(id); if (r) r.hidden = !(msg && retry); }
 }
 // الرجوع للصفحة بزر Back بعد تحويل Google (bfcache) لازم يفك الزر والقفل
 window.addEventListener('pageshow', (ev) => { if (ev.persisted) { setLoginBusy(false); authLockEnd(); } });
@@ -76,20 +88,24 @@ export function hideLoading() {
 // والمتصفحات الحديثة بتحجب تخزين الطرف الثالث => signInWithRedirect بيرجع بدون جلسة (نتيجة فاضية بدون خطأ). الـ Popup مش بيعتمد على كده.
 // مهم: signInWithPopup لازم تتنادى في نفس الـ click handler قبل أي await عشان المتصفح ما يحجبش النافذة.
 export async function loginGoogle(type) {
-  // type: 'customer' | 'driver' | 'merchant' (الزر اللي ضغطه المستخدم). مفيش حالة قديمة: كل ضغطة بتحدد النوع من جديد.
-  window.selectedType = type === 'driver' || type === 'merchant' ? type : 'customer';
+  // النوع (عميل أو كابتن أو تاجر). لو مفيش نوع صالح (لا وسيط ولا اختيار سابق) => لا نفتح Google ولا نفترض "عميل": نرجّع المستخدم لاختيار نوع الحساب.
+  const role = INTENT_ROLES.includes(type) ? type : window.selectedType;
+  if (!INTENT_ROLES.includes(role)) { openRolePick(); showLoginError(MSG_ROLE_REQUIRED); return; }
   if (!authLockStart()) return; // منع الضغط المتكرر
+  window.selectedType = role;
   showLoginError(''); showAltLogin(false);
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
   setLoginBusy(true, 'جاري فتح Google…');
-  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType); } catch(e) {}
+  setEntryIntent(role); _loginInFlight = true; // الدور المختار يُحفظ قبل أي عملية Google وبشكل متزامن قبل أول انتظار
   try {
     const cred = await signInWithPopup(auth, gProvider);
+    // لو مستمع الجلسة (onAuthStateChanged) سبق والتقط الاختيار وعالج هذا الدخول، لا نمرّر نفس الدخول على البوابة مرة تانية
+    // (مرة تانية بدون الدور المختار كانت هتعامله كجلسة مستعادة وتفتح لوحة الدور الفعلي بعد الرفض).
+    if (!_loginInFlight) return;
     if (window.CU && cred?.user && window.CU.uid === cred.user.uid) {
-      // نفس المستخدم كان داخل بالفعل (مفيش onAuthStateChanged جديد): نطبّق فحص الدور هنا بنفسنا.
+      // نفس المستخدم كان داخل بالفعل (مفيش onAuthStateChanged جديد): نمرّر على نفس البوابة (قراءة طازجة من Firestore + فحص الدور).
       resetLoginState();
-      const msg = roleIntentConflict(takeEntryType(), window.CUD?.role);
-      if (msg) await rejectRoleMismatch(msg); else routeUser();
+      await handleSignedIn(cred.user, captureLoginIntent());
       return;
     }
     // الدخول الفعلي يؤكده onAuthStateChanged فقط (هو اللي يوجّه ويفك الزر). لو لسه ماوصلش نغيّر الوصف ونراقب.
@@ -98,7 +114,7 @@ export async function loginGoogle(type) {
       setTimeout(() => { if (!window.CU) { resetLoginState(); showLoginError(SESSION_NOT_READY); } }, 15000);
     }
   } catch(e) {
-    try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(_) {}
+    clearEntryIntent();
     resetLoginState();
     const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
     if (!d.silent) showLoginError(d.message);
@@ -107,9 +123,28 @@ export async function loginGoogle(type) {
   }
 }
 
-// الحساب مرتبط بدور مختلف عن اللي اختاره المستخدم: نعرض الرسالة ونسجّل الخروج (بدون مسح أي بيانات) ولا نفتح واجهة الدور التاني.
-export async function rejectRoleMismatch(message) {
+// ===== الصفحة الرئيسية -> اختيار نوع الحساب -> شاشة الدخول (Google) =====
+export function openRolePick() {
+  showLoginError(''); showAltLogin(false); showScreen('screen-role-pick');
+}
+export function openLogin(type) {
+  if (!INTENT_ROLES.includes(type)) { openRolePick(); return; }
+  window.selectedType = type; // UI فقط - القرار الفعلي في evaluateRoleGate من Firestore
+  const ui = ROLE_UI[type];
+  const t = document.getElementById('lg-role-title'); if (t) t.textContent = ui.title;
+  const n = document.getElementById('lg-role-note'); if (n) n.textContent = ui.note;
+  const card = document.getElementById('screen-login'); if (card) card.setAttribute('data-role', type);
+  setLoginBusy(false); showLoginError(''); showAltLogin(false);
+  showScreen('screen-login');
+}
+export function pickRole(type) { openLogin(type); }
+
+// الحساب مرتبط بدور مختلف (أو حالة غير آمنة): نسجّل الخروج فعليًا (بدون مسح أي بيانات دائمة) ونعرض الرسالة
+// where: 'login' (نفس شاشة الدور المختار + Google لحساب آخر) | 'pick' (اختيار النوع من جديد) | 'home'
+export async function rejectRoleMismatch(message, { where = 'home', intent = null } = {}) {
   await doLogout();
+  if (where === 'login' && INTENT_ROLES.includes(intent)) openLogin(intent);
+  else if (where === 'pick') openRolePick();
   showLoginError(message);
 }
 
@@ -120,7 +155,9 @@ export async function loginGoogleRedirect() {
   showLoginError(''); showAltLogin(false);
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
   setLoginBusy(true, 'جاري التحويل إلى Google…');
-  try { sessionStorage.setItem(ENTRY_TYPE_KEY, window.selectedType || 'customer'); sessionStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now())); } catch(e) {}
+  if (!INTENT_ROLES.includes(window.selectedType)) { resetLoginState(); openRolePick(); showLoginError(MSG_ROLE_REQUIRED); return; }
+  setEntryIntent(window.selectedType); _loginInFlight = true;
+  try { sessionStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now())); } catch(e) {}
   try {
     await signInWithRedirect(auth, gProvider);
   } catch(e) {
@@ -140,11 +177,11 @@ export async function doLogout() {
   // صراحة هنا وإلا ممكن تفضل عالقة ظاهرة فوق شاشة الدخول بعد تسجيل الخروج.
   const cd = document.getElementById('screen-cust-detail'); if (cd) cd.style.display = 'none';
   // تنظيف حالة المستخدم السابق (تبديل حسابات Google): لا يبقى أي دور/حالة/مسودة من حساب سابق.
-  try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {}
+  clearEntryIntent(); _lastAttempt = null; // الدور المختار القديم لا يبقى عالقًا بعد الخروج
   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
-  window.CUD = null; window.uploadedDocs = {};
+  window.CUD = null; window.CU = null; window.uploadedDocs = {};
   try { await signOut(auth); } catch(e) {}
-  window.selectedType = 'customer'; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
+  window.selectedType = null; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
   showScreen('screen-entry');
 }
 
@@ -173,8 +210,8 @@ export async function completeRegistration(role) {
     // بدل ما نكرر الكتابة أو نغيّر دور موجود بالفعل.
     const existing = await getDoc(doc(db,'users',user.uid));
     if (existing.exists()) {
-      window.CUD = existing.data();
-      routeUser();
+      // المستند اتعمل بالفعل (تاب تاني/Retry): نعدّي على نفس بوابة الدور بدل التوجيه المباشر (لا تغيير دور ولا فتح لوحة مختلفة).
+      await handleSignedIn(user, { intent: role, fresh: true });
       return;
     }
     const data = {
@@ -275,15 +312,59 @@ export function renderMerchantStatus() {
 export function editMerchantProfile() { showScreen('screen-complete-merchant'); }
 
 
+// ===== بوابة الدور: تُنفَّذ بعد تأكيد Firebase للجلسة، وقبل تحميل أي بيانات خاصة بدور أو فتح أي لوحة =====
+// مسار واحد لكل حالات الدخول: popup / redirect / استعادة جلسة / نفس المستخدم داخل بالفعل.
+// attempt = { intent, fresh } من captureLoginIntent(). المصدر الوحيد للدور الفعلي: users/{uid} في Firestore.
+let _lastAttempt = null; // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
+export async function handleSignedIn(user, attempt = {}) {
+  const intent = attempt.intent || null, fresh = !!attempt.fresh;
+  window.CU = user; window.CUD = null; // لا لوحة تُفتح قبل ما الدور يتأكد
+  let data = null, exists = false, storeMissing = false;
+  try {
+    const ud = await getDoc(doc(db, 'users', user.uid));
+    exists = ud.exists(); data = exists ? ud.data() : null;
+    if (exists && data.role === 'merchant') storeMissing = !(await getDoc(doc(db, 'stores', user.uid))).exists();
+  } catch(e) {
+    // فشل القراءة (شبكة/صلاحيات): لا نخمّن الدور ولا نفتح لوحة. رسالة + إعادة محاولة بنفس الدور المختار.
+    console.error('Auth routing error (users read):', e);
+    _lastAttempt = { intent, fresh }; window.CUD = null;
+    hideLoading();
+    if (fresh && INTENT_ROLES.includes(intent)) openLogin(intent); else showScreen('screen-entry');
+    showLoginError(MSG_USER_LOAD_FAILED, { retry: true });
+    return;
+  }
+  _lastAttempt = null;
+  const gate = evaluateRoleGate({ intent, fresh, exists, role: data?.role });
+  if (gate.action === 'reject') { hideLoading(); await rejectRoleMismatch(gate.message, { where: 'login', intent }); return; }
+  if (gate.action === 'deny') { hideLoading(); await rejectRoleMismatch(gate.message, { where: gate.reason === 'intent-missing' ? 'pick' : 'home' }); return; }
+  hideLoading();
+  if (gate.action === 'register') {
+    // حساب جديد: الإنشاء الفعلي في completeRegistration() (الرقابة الفعلية في Rules). بدون دور مختار => شاشة اختيار الدور.
+    if (intent) completeRegistration(intent); else showScreen('screen-role-select');
+    return;
+  }
+  window.CUD = data;
+  // Resume Registration: تاجر عنده users/{uid} من غير stores/{uid} (تسجيل لم يكتمل) => يرجع لنفس الخطوة الناقصة.
+  if (data.role === 'merchant' && storeMissing) { showScreen('screen-complete-merchant'); return; }
+  routeUser();
+}
+export function retryLoadAccount() {
+  const u = auth.currentUser;
+  if (!u) { showLoginError(''); showScreen('screen-entry'); return; }
+  showLoginError('');
+  return handleSignedIn(u, _lastAttempt || {});
+}
+
 // ===== ROUTING =====
 export function routeUser() {
-  const role = window.CUD?.role;
+  const target = resolveRoute(window.CUD);
+  // fail-closed: دور غائب/غير معروف (أو CUD لم يُحمَّل) لا يفتح أي لوحة، حتى لو اتنادى routeUser من مكان تاني.
+  if (target === 'unknown') { rejectRoleMismatch(MSG_INVALID_ROLE, { where: 'home' }); return; }
   startNotifListener();
   loadCategories();
   loadBanners();
   loadCoupons();
   listenSettings();
-  const target = resolveRoute(window.CUD);
   // MATLABK: التوجيه من الحالة الفعلية (من Firestore) - بدون الوصول لأي Dashboard ثم المنع.
   if (target === 'admin') { showScreen('screen-admin'); loadAdminData(); }
   else if (target === 'driver-register') showScreen('screen-driver-register');

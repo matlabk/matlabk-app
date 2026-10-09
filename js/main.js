@@ -2,7 +2,7 @@
 // الواجهة تلاقيها، يجهّز PWA، ويستمع لحالة تسجيل الدخول في Firebase =====
 
 import { db, auth, doc, getDoc, onAuthStateChanged, getRedirectResult } from './firebase.js';
-import { roleIntentConflict, signedOutOutcome } from './auth-flow.js';
+import { signedOutOutcome } from './auth-flow.js';
 import { Logger, initOfflineHandling, callCurrentStore, callStore, closeModal, filterProds, openNotifs, openWA, setLoad, showErr, showScreen, showToast, waCurrentStore } from './utils.js';
 import { markNotifRead, startNotifListener, registerNotificationsResets } from './notifications.js';
 import { initAdminMap, initTrackMap, closeLocationPicker, locPickerConfirm, locPickerUseCurrent, locPickerOnSearchInput, locPickerOnCategoryClick, locPickerOnResultClick, recenterTrackMap, recenterRideStatusMap, toggleDriverMap, showDriverMapTab, registerMapsResets } from './maps.js';
@@ -13,7 +13,7 @@ import { delProd, loadMerchantData, loadMerchantOrders, loadMerchantProds, merch
 import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
 import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
 import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, takeEntryType, rejectRoleMismatch, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
+import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
 import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
 import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
 import { renderIcons } from './icons.js';
@@ -66,7 +66,7 @@ Object.assign(window, {
   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
   smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, loginGoogleRedirect, hideLoading,
   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
-  loginGoogle, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
+  loginGoogle, openRolePick, pickRole, openLogin, retryLoadAccount, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
   syncToHubSpot, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
   acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus,
   sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer,
@@ -111,6 +111,7 @@ try { if (hasRedirectPending()) { const s = document.getElementById('ld-sub'); i
 
 onAuthStateChanged(auth, async user => {
   if (user) {
+    const attempt = captureLoginIntent(); // الدور المختار + هل ده دخول جديد؟ (لازم قبل resetLoginState/clearRedirectPending)
     resetLoginState(); clearRedirectPending(); // Firebase أكّد الجلسة فعليًا => نفك زر الدخول ونمسح علامة الـ redirect
     // MATLABK: منع تسرّب حالة حساب لحساب تاني (تبديل حسابات Google): أي بيانات محلية مرتبطة بمستخدم سابق تتمسح.
     try {
@@ -120,38 +121,12 @@ onAuthStateChanged(auth, async user => {
     } catch(e) {}
     window.CUD = null;
     window.CU = user;
-    try {
-      const ud = await getDoc(doc(db,'users',user.uid));
-      const intent = takeEntryType(); // اللي اختاره المستخدم في شاشة الدخول (null لو جلسة مستعادة) - بيتقرا مرة واحدة
-      if (ud.exists()) {
-        // MATLABK: فصل الأدوار - الدور الفعلي من Firestore. لو مختلف عن اللي اختاره المستخدم: رسالة + خروج، ومفيش فتح لواجهة الدور التاني.
-        const conflict = roleIntentConflict(intent, ud.data().role);
-        if (conflict) { hideLoading(); await rejectRoleMismatch(conflict); return; }
-        window.CUD = ud.data();
-        // Resume Registration (Auth V2): تاجر عنده users/{uid} لكن من غير stores/{uid} - تسجيل
-        // قديم لم يكتمل (كان ده الـ Bug المكتشف في مراجعة Google Sign-In). يُعامل كتسجيل غير
-        // مكتمل، صفر مستند جديد بيتعمل، بس بيرجعله لنفس الخطوة الناقصة.
-        if (window.CUD.role === 'merchant') {
-          const sd = await getDoc(doc(db,'stores',user.uid));
-          if (!sd.exists()) { hideLoading(); showScreen('screen-complete-merchant'); return; }
-        }
-        hideLoading();
-        routeUser();
-      } else {
-        // Authentication Gateway (V2): الـ Gateway هنا مسؤول عن القراءة والتوجيه بس - صفر كتابة
-        // Business Document من هنا لأي Provider (Email/Google/أي حاجة مستقبلية). أي مستخدم جديد
-        // بيتوجه لشاشة اختيار الدور، والإنشاء الفعلي بيحصل في completeRegistration() (auth.js)
-        // بس لحظة ما المستخدم يختار دوره فعليًا.
-        hideLoading();
-        // MATLABK: لو المستخدم اختار نوع الحساب من شاشة الدخول قبل Google، ننشئ حسابه مباشرة (الرقابة الفعلية في Rules).
-        const entryType = intent;
-        if (entryType) completeRegistration(entryType); else showScreen('screen-role-select');
-      }
-    } catch(e) {
+    // بوابة الدور المشتركة (auth.js): قراءة users/{uid} + مقارنة الدور المختار بالفعلي + fail-closed، قبل أي لوحة.
+    try { await handleSignedIn(user, attempt); }
+    catch(e) {
       console.error('Auth routing error:', e);
-      hideLoading();
-      showToast(firebaseAuthErrorMessage(e), 'err');
-      showScreen('screen-entry');
+      window.CUD = null; hideLoading();
+      showScreen('screen-entry'); showLoginError(firebaseAuthErrorMessage(e));
     }
   } else {
     // MATLABK: "مفيش مستخدم" مش نهائي إلا بعد ما getRedirectResult يخلّص (منع race بين النتيجتين). لو كنا بادئين redirect نستنى أطول.
@@ -161,7 +136,8 @@ onAuthStateChanged(auth, async user => {
     if (out.action === 'ignore') return; // الجلسة اتأكدت فعليًا - الـ callback الخاص بالمستخدم هو اللي بيوجّه
     window.CU = null; window.CUD = null;
     hideLoading(); resetLoginState(); clearRedirectPending();
+    const keep = out.error ? peekEntryType() : null; clearEntryIntent();
+    if (keep) openLogin(keep); else showScreen('screen-entry');
     if (out.error) showLoginError(out.error); // رجوع من Google بدون جلسة: رسالة واضحة بدل الرجوع الصامت لشاشة الدخول
-    showScreen('screen-entry');
   }
 });

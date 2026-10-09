@@ -44,13 +44,56 @@ export function isRedirectPendingValid(stamp, now = Date.now()) {
 
 // ===== فصل الأدوار (عميل / كابتن / تاجر) على نفس حساب Google =====
 // الدور الحقيقي من Firestore (users/{uid}.role) - والـ Rules تمنع تغييره (role ثابت) وتمنع إنشاء مستند تاني بنفس الـ uid.
-// intent = اللي المستخدم اختاره في شاشة الدخول (customer | driver | merchant). null = جلسة مستعادة بدون اختيار => نوجّه بالدور المخزّن.
+// intent = اللي المستخدم اختاره قبل Google (customer | driver | merchant). null = جلسة مستعادة (لم يختر شيئًا في هذه الزيارة) => نوجّه بالدور المخزّن.
+// مبدأ الأمان: غياب الدور المختار في دخول جديد (fresh) أو دور غير معروف في Firestore **ليس تصريحًا** => رفض (fail-closed).
 export const ROLE_LABELS = { customer: 'عميل', driver: 'كابتن', merchant: 'تاجر', admin: 'إدارة' };
+export const INTENT_ROLES = ['customer', 'driver', 'merchant'];
 const INTENT_AS = { customer: 'كعميل', driver: 'ككابتن', merchant: 'كتاجر' };
+
+// نصوص شاشة الدخول لكل دور (تُعرض بعد اختيار نوع الحساب)
+export const ROLE_UI = {
+  customer: { title: 'الدخول كعميل', note: 'اطلب من متاجر المنايف وتابع طلباتك ومشاويرك.' },
+  merchant: { title: 'الدخول كتاجر', note: 'بعد التسجيل تُراجَع بيانات متجرك من الإدارة قبل التفعيل.' },
+  driver: { title: 'الدخول ككابتن توصيل', note: 'بعد التسجيل تُراجَع بياناتك من الإدارة قبل التفعيل.' },
+};
+
+export const MSG_USER_LOAD_FAILED = 'تعذّر تحميل بيانات حسابك. تأكد من الاتصال ثم اضغط «إعادة المحاولة».';
+export const MSG_INVALID_ROLE = 'بيانات حسابك غير مكتملة أو غير صالحة، ولا يمكن فتح أي لوحة الآن. تواصل مع الدعم لمراجعة الحساب.';
+export const MSG_INTENT_MISSING = 'لم نتمكن من تحديد نوع الحساب الذي اخترته. اختر نوع الحساب ثم سجّل الدخول مرة أخرى.';
+export const MSG_ROLE_REQUIRED = 'اختر نوع الحساب أولًا (عميل أو تاجر أو كابتن).';
+
+// رسالة التعارض. لا نكشف شيئًا عن حساب الإدارة (نص عام) - صاحب الحساب الحقيقي فقط هو اللي وصل لهنا بعد Google.
 export function roleIntentConflict(intent, role) {
-  if (!intent || !role || !INTENT_AS[intent] || !ROLE_LABELS[role]) return null;
+  if (!INTENT_AS[intent]) return null;
+  if (!ROLE_LABELS[role]) return null; // الدور غير المعروف يعالجه evaluateRoleGate (deny) - مش تصريح
   if (role === intent) return null;
-  // حساب الإدارة بيدخل من زر الدخول الرئيسي (بدون زر ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
+  // حساب الإدارة بيدخل من زر "عميل" (بدون خيار ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
   if (role === 'admin' && intent === 'customer') return null;
-  return `هذا البريد الإلكتروني مستخدم بالفعل لحساب ${ROLE_LABELS[role]} في MATLABK. لا يمكن استخدامه ${INTENT_AS[intent]}. يرجى استخدام بريد إلكتروني آخر.`;
+  const registered = role === 'admin' ? 'بحساب آخر في MATLABK' : `كحساب ${ROLE_LABELS[role]}`;
+  return `هذا البريد الإلكتروني مسجّل بالفعل ${registered}. لاستخدام MATLABK ${INTENT_AS[intent]}، يُرجى تسجيل الدخول ببريد Google آخر.`;
+}
+
+// قرار البوابة بعد تأكيد Firebase للجلسة وقراءة users/{uid} (دالة نقية - مصدر القرار الوحيد قبل فتح أي لوحة):
+//  register: لا يوجد مستند مستخدم (حساب جديد)  |  allow: يُوجَّه حسب الدور المخزّن
+//  reject: تعارض دور (رسالة + خروج، الرجوع لشاشة الدخول بنفس الدور)  |  deny: حالة غير آمنة (رسالة + خروج)
+export function evaluateRoleGate({ intent = null, fresh = false, exists, role }) {
+  if (!exists) return { action: 'register' };
+  if (!ROLE_LABELS[role]) return { action: 'deny', reason: 'invalid-role', message: MSG_INVALID_ROLE };
+  if (fresh && !INTENT_ROLES.includes(intent)) return { action: 'deny', reason: 'intent-missing', message: MSG_INTENT_MISSING };
+  const msg = roleIntentConflict(intent, role);
+  if (msg) return { action: 'reject', reason: 'role-mismatch', message: msg };
+  return { action: 'allow' };
+}
+
+// ===== حفظ الدور المختار (sessionStorage = للنجاة من إعادة تحميل الصفحة فقط، مش مصدر صلاحيات) =====
+export const INTENT_TTL_MS = 10 * 60 * 1000;
+export function encodeIntent(type, now = Date.now()) {
+  return INTENT_ROLES.includes(type) ? JSON.stringify({ t: type, ts: now }) : null;
+}
+export function decodeIntent(raw, now = Date.now()) {
+  if (typeof raw !== 'string' || !raw) return null;
+  let o; try { o = JSON.parse(raw); } catch (e) { return null; }
+  if (!o || !INTENT_ROLES.includes(o.t)) return null;
+  const age = now - Number(o.ts);
+  return Number.isFinite(age) && age >= 0 && age <= INTENT_TTL_MS ? o.t : null;
 }
