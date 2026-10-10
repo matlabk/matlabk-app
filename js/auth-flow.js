@@ -16,14 +16,46 @@ const TABLE = {
   'auth/web-storage-unsupported': { message: 'متصفحك يمنع حفظ بيانات الدخول. فعّل التخزين أو جرّب متصفحًا آخر.' },
   'auth/account-exists-with-different-credential': { message: 'هذا البريد مسجّل بطريقة دخول قديمة لم تعد مدعومة. تواصل مع الإدارة لمساعدتك.' },
 };
+// أخطاء البريد وكلمة المرور (رسائل عامة: لا نفرّق بين "البريد غير موجود" و"كلمة المرور غلط" عشان ما نكشفش مين مسجّل)
+const BAD_CREDENTIALS = 'البريد الإلكتروني أو كلمة المرور غير صحيحة. إذا كنت سجّلت سابقًا عبر Google فاستخدم زر Google.';
+const EMAIL_TABLE = {
+  'auth/invalid-credential': { message: BAD_CREDENTIALS },
+  'auth/wrong-password': { message: BAD_CREDENTIALS },
+  'auth/user-not-found': { message: BAD_CREDENTIALS },
+  'auth/invalid-login-credentials': { message: BAD_CREDENTIALS },
+  'auth/invalid-email': { message: 'صيغة البريد الإلكتروني غير صحيحة. تأكد منه وحاول مرة أخرى.' },
+  'auth/missing-password': { message: 'اكتب كلمة المرور.' },
+  'auth/email-already-in-use': { message: 'هذا البريد الإلكتروني مسجّل بالفعل (ربما عبر Google). سجّل الدخول بالطريقة التي استخدمتها، أو اضغط «نسيت كلمة المرور؟».' },
+  'auth/weak-password': { message: 'كلمة المرور ضعيفة. استخدم 8 أحرف على الأقل.' },
+  'auth/operation-not-allowed': { message: 'الدخول بالبريد الإلكتروني غير متاح حاليًا. استخدم Google أو تواصل مع الدعم.' },
+  'auth/too-many-requests': { message: 'محاولات كثيرة متتالية. انتظر قليلًا ثم حاول مرة أخرى، أو استعد كلمة المرور.' },
+};
+export const MIN_PASSWORD_LENGTH = 8;
+export const RESET_SENT = 'إذا كان هذا البريد مسجّلًا لدينا، فسيصلك رابط لإعادة تعيين كلمة المرور خلال دقائق. راجع الرسائل غير المرغوبة أيضًا.';
+export const normalizeEmail = (v) => String(v == null ? '' : v).trim();
+// تحقق بسيط للصيغة (التحقق النهائي من Firebase): شيء@شيء.شيء بدون مسافات
+export function isValidEmail(v) { const e = normalizeEmail(v); return e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e); }
+export function validateEmailLogin({ email, password }) {
+  if (!isValidEmail(email)) return { ok: false, message: EMAIL_TABLE['auth/invalid-email'].message };
+  if (typeof password !== 'string' || password.length === 0) return { ok: false, message: EMAIL_TABLE['auth/missing-password'].message };
+  return { ok: true };
+}
+export function validateSignup({ email, password, confirm }) {
+  if (!isValidEmail(email)) return { ok: false, message: EMAIL_TABLE['auth/invalid-email'].message };
+  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) return { ok: false, message: `كلمة المرور يجب ألا تقل عن ${MIN_PASSWORD_LENGTH} أحرف.` };
+  if (password.length > 128) return { ok: false, message: 'كلمة المرور طويلة جدًا (الحد الأقصى 128 حرفًا).' };
+  if (password !== confirm) return { ok: false, message: 'كلمتا المرور غير متطابقتين.' };
+  return { ok: true };
+}
 export const GENERIC_ERROR = 'حدث خطأ غير متوقع. حاول مرة أخرى.';
 export const OFFLINE_ERROR = 'لا يوجد اتصال بالإنترنت. تأكد من الشبكة وحاول مرة أخرى.';
 export const REDIRECT_FAILED = 'تعذّر إكمال تسجيل الدخول بعد العودة من Google على هذا المتصفح. جرّب "المتابعة باستخدام Google" مرة أخرى بالنافذة المنبثقة، أو افتح الموقع من متصفح آخر.';
 export const SESSION_NOT_READY = 'تم اختيار الحساب لكن تعذّر إكمال الدخول. تأكد من الاتصال وحاول مرة أخرى.';
 
-export function describeAuthError(e, { online = true } = {}) {
+export function describeAuthError(e, { online = true, method = 'google' } = {}) {
   if (online === false) return { message: OFFLINE_ERROR, silent: false, offerRedirect: false };
-  const hit = TABLE[e && e.code];
+  // رسائل البريد/كلمة المرور لها الأولوية في مسار البريد (operation-not-allowed و too-many-requests بنصوص تناسبه)؛ مسار Google بلا تغيير.
+  const hit = (method === 'email' && EMAIL_TABLE[e && e.code]) || TABLE[e && e.code];
   return hit ? { silent: false, offerRedirect: false, ...hit } : { message: GENERIC_ERROR, silent: false, offerRedirect: false };
 }
 
@@ -63,24 +95,25 @@ export const MSG_INTENT_MISSING = 'لم نتمكن من تحديد نوع الح
 export const MSG_ROLE_REQUIRED = 'اختر نوع الحساب أولًا (عميل أو تاجر أو كابتن).';
 
 // رسالة التعارض. لا نكشف شيئًا عن حساب الإدارة (نص عام) - صاحب الحساب الحقيقي فقط هو اللي وصل لهنا بعد Google.
-export function roleIntentConflict(intent, role) {
+export function roleIntentConflict(intent, role, method = 'google') {
   if (!INTENT_AS[intent]) return null;
   if (!ROLE_LABELS[role]) return null; // الدور غير المعروف يعالجه evaluateRoleGate (deny) - مش تصريح
   if (role === intent) return null;
   // حساب الإدارة بيدخل من زر "عميل" (بدون خيار ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
   if (role === 'admin' && intent === 'customer') return null;
   const registered = role === 'admin' ? 'بحساب آخر في MATLABK' : `كحساب ${ROLE_LABELS[role]}`;
-  return `هذا البريد الإلكتروني مسجّل بالفعل ${registered}. لاستخدام MATLABK ${INTENT_AS[intent]}، يُرجى تسجيل الدخول ببريد Google آخر.`;
+  const other = method === 'email' ? 'ببريد إلكتروني آخر' : 'ببريد Google آخر';
+  return `هذا البريد الإلكتروني مسجّل بالفعل ${registered}. لاستخدام MATLABK ${INTENT_AS[intent]}، يُرجى تسجيل الدخول ${other}.`;
 }
 
 // قرار البوابة بعد تأكيد Firebase للجلسة وقراءة users/{uid} (دالة نقية - مصدر القرار الوحيد قبل فتح أي لوحة):
 //  register: لا يوجد مستند مستخدم (حساب جديد)  |  allow: يُوجَّه حسب الدور المخزّن
 //  reject: تعارض دور (رسالة + خروج، الرجوع لشاشة الدخول بنفس الدور)  |  deny: حالة غير آمنة (رسالة + خروج)
-export function evaluateRoleGate({ intent = null, fresh = false, exists, role }) {
+export function evaluateRoleGate({ intent = null, fresh = false, exists, role, method = 'google' }) {
   if (!exists) return { action: 'register' };
   if (!ROLE_LABELS[role]) return { action: 'deny', reason: 'invalid-role', message: MSG_INVALID_ROLE };
   if (fresh && !INTENT_ROLES.includes(intent)) return { action: 'deny', reason: 'intent-missing', message: MSG_INTENT_MISSING };
-  const msg = roleIntentConflict(intent, role);
+  const msg = roleIntentConflict(intent, role, method);
   if (msg) return { action: 'reject', reason: 'role-mismatch', message: msg };
   return { action: 'allow' };
 }

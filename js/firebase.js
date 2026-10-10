@@ -1,7 +1,7 @@
 // ===== Firebase Module =====
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import { getFirestore, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { getAuth, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+import { getAuth, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 
 // ===== CONFIG =====
 const FC = {
@@ -22,7 +22,7 @@ const gProvider = new GoogleAuthProvider();
 gProvider.setCustomParameters({ prompt: 'select_account' });
 
 // ===== EXPORTS =====
-export { db, auth, gProvider, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion, signOut, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult };
+export { db, auth, gProvider, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion, signOut, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail };
 
 // ===== CLOUDINARY CONFIG =====
 export const CLOUDINARY_CLOUD = 'yfohr6xd';
