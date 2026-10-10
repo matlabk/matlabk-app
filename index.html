@@ -117,11 +117,62 @@
         <span class="lg-spin" aria-hidden="true"></span>
       </button>
       <p id="lg-role-note" class="lg-note"></p>
+      <div class="em-div" role="separator" aria-label="أو"><span>أو</span></div>
+      <form class="em-form" id="em-form" novalidate onsubmit="emailLogin(event)">
+        <label class="em-label" for="em-email">البريد الإلكتروني</label>
+        <input class="em-input" id="em-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+        <label class="em-label" for="em-pass">كلمة المرور</label>
+        <input class="em-input" id="em-pass" name="password" type="password" autocomplete="current-password" dir="ltr" required>
+        <button type="submit" id="em-submit" class="em-submit"><span id="em-submit-label">تسجيل الدخول</span><span class="lg-spin" aria-hidden="true"></span></button>
+        <div class="em-links">
+          <button type="button" id="em-forgot" class="lg-link" onclick="openForgot()">نسيت كلمة المرور؟</button>
+          <button type="button" id="em-signup" class="lg-link" onclick="openSignup()">إنشاء حساب جديد</button>
+        </div>
+      </form>
       <div class="lg-err-slot"><div id="err-msg" class="lg-err" role="alert" aria-live="assertive"></div></div>
       <button type="button" id="lg-retry" class="lg-link lg-alt" hidden onclick="retryLoadAccount()">إعادة المحاولة</button>
       <button type="button" id="lg-alt" class="lg-link lg-alt" hidden onclick="loginGoogleRedirect()">المتابعة بدون نافذة منبثقة</button>
     </section>
     <p class="lg-legal">بمتابعتك، أنت توافق على شروط الاستخدام وسياسة الخصوصية.</p>
+  </div>
+</div>
+
+<!-- ===== إنشاء حساب بالبريد الإلكتروني (الدور المختار محفوظ من شاشة الدخول) ===== -->
+<div id="screen-signup" class="screen">
+  <div class="lg-wrap">
+    <button type="button" id="su-back" class="lg-back" onclick="openLogin(window.selectedType)"><span aria-hidden="true">→</span> رجوع لتسجيل الدخول</button>
+    <header class="lg-brand rp-head">
+      <h1 class="rp-title">إنشاء حساب جديد</h1>
+      <p class="lg-sub">بالبريد الإلكتروني وكلمة المرور</p>
+    </header>
+    <form class="em-form" id="su-form" novalidate onsubmit="emailSignup(event)">
+      <label class="em-label" for="su-email">البريد الإلكتروني</label>
+      <input class="em-input" id="su-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+      <label class="em-label" for="su-pass">كلمة المرور (8 أحرف على الأقل)</label>
+      <input class="em-input" id="su-pass" name="new-password" type="password" autocomplete="new-password" minlength="8" dir="ltr" required>
+      <label class="em-label" for="su-pass2">تأكيد كلمة المرور</label>
+      <input class="em-input" id="su-pass2" name="confirm-password" type="password" autocomplete="new-password" dir="ltr" required>
+      <button type="submit" id="su-submit" class="em-submit"><span id="su-submit-label">إنشاء الحساب</span><span class="lg-spin" aria-hidden="true"></span></button>
+      <div class="lg-err-slot"><div id="su-err" class="lg-err" role="alert" aria-live="assertive"></div></div>
+    </form>
+    <p class="lg-legal">بمتابعتك، أنت توافق على شروط الاستخدام وسياسة الخصوصية.</p>
+  </div>
+</div>
+
+<!-- ===== استعادة كلمة المرور (رسالة Firebase الرسمية) ===== -->
+<div id="screen-forgot" class="screen">
+  <div class="lg-wrap">
+    <button type="button" id="fg-back" class="lg-back" onclick="openLogin(window.selectedType)"><span aria-hidden="true">→</span> رجوع لتسجيل الدخول</button>
+    <header class="lg-brand rp-head">
+      <h1 class="rp-title">استعادة كلمة المرور</h1>
+      <p class="lg-sub">اكتب بريدك الإلكتروني وسنرسل لك رابط إعادة التعيين</p>
+    </header>
+    <form class="em-form" id="fg-form" novalidate onsubmit="emailReset(event)">
+      <label class="em-label" for="fg-email">البريد الإلكتروني</label>
+      <input class="em-input" id="fg-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+      <button type="submit" id="fg-submit" class="em-submit"><span id="fg-submit-label">إرسال رابط الاستعادة</span><span class="lg-spin" aria-hidden="true"></span></button>
+      <div class="lg-err-slot"><div id="fg-err" class="lg-err" role="alert" aria-live="assertive"></div><div id="fg-ok" class="em-ok" role="status" aria-live="polite" style="display:none"></div></div>
+    </form>
   </div>
 </div>
 
