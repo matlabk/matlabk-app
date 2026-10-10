@@ -7,21 +7,30 @@ test('no user-facing old brand', () => {
   assert.match(html, /<title>MATLABK/); assert.match(R('js/main.js'), /name:'MATLABK'/);
   for (const f of ['js/admin.js', 'js/external.js', 'js/notifications.js', 'js/orders.js']) assert.doesNotMatch(R(f), /['"`][^'"`\n]*(MOVA|موزا)[^'"`\n]*['"`]/);
 });
-test('Google-only authentication: no legacy provider code anywhere (comments stripped)', () => {
-  const FORBIDDEN = ['createUserWithEmailAndPassword', 'signInWithEmailAndPassword', 'sendPasswordResetEmail', 'sendSignInLinkToEmail', 'signInWithEmailLink', 'isSignInWithEmailLink',
+test('auth providers: Google + email/password only; legacy email-link/OTP/linking code stays forbidden; email-password SDK calls live only in auth.js + firebase.js', () => {
+  const FORBIDDEN = ['sendSignInLinkToEmail', 'signInWithEmailLink', 'isSignInWithEmailLink',
     'EmailAuthProvider', 'linkWithCredential', 'linkWithRedirect', 'linkWithPopup', 'fetchSignInMethodsForEmail', 'emailForSignIn', 'doLogin', 'doRegister', 'showForgot', 'showEmailOTP',
     'handleEmailAlreadyInUse', 'handleGoogleAccountConflict', 'maybeOfferPendingLink', 'mova_link_intent', 'LINK_INTENT', 'stashLinkIntent', 'readLinkIntent', 'clearLinkIntent', 'switchTab'];
   const files = ['index.html', ...fs.readdirSync(new URL('../js/', import.meta.url)).map((f) => 'js/' + f), 'functions/index.js', 'functions/lib/dispatch-core.js'];
   for (const f of files) { const s = strip(R(f).replace(/<!--[\s\S]*?-->/g, '')); for (const w of FORBIDDEN) assert.ok(!s.includes(w), `${f} still references ${w}`); }
 });
+test('email/password SDK calls are confined to auth.js (+ firebase.js re-export); no passwords in storage/logs', () => {
+  const ALLOWED = new Set(['firebase.js', 'auth.js']);
+  for (const f of fs.readdirSync(new URL('../js/', import.meta.url))) { const t = strip(R('js/' + f)); if (!ALLOWED.has(f)) for (const w of ['createUserWithEmailAndPassword', 'signInWithEmailAndPassword', 'sendPasswordResetEmail']) assert.ok(!t.includes(w), `${f} uses ${w}`); }
+  const a = strip(R('js/auth.js'));
+  assert.doesNotMatch(a, /(local|session)Storage\.setItem\([^)]*(pass|pwd|secret)/i);
+  assert.doesNotMatch(a, /console\.(log|warn|error|info|debug)\([^)]*(password|em-pass|su-pass|\bpw\b)/i);
+  assert.doesNotMatch(a, /(setDoc|updateDoc)\([^;]*password/i);
+  assert.doesNotMatch(R('index.html'), /type="password"[^>]*value=|autocomplete="off"[^>]*type="password"/);
+});
 test('Google Auth: popup is the primary flow, redirect kept only as explicit fallback; getRedirectResult + onAuthStateChanged intact', () => {
   const fb = R('js/firebase.js'); const imp = fb.match(/import \{([^}]*)\} from "https:\/\/www\.gstatic\.com\/firebasejs\/[\d.]+\/firebase-auth\.js"/)[1].split(',').map((x) => x.trim()).sort();
-  assert.deepEqual(imp, ['GoogleAuthProvider', 'getAuth', 'getRedirectResult', 'onAuthStateChanged', 'signInWithPopup', 'signInWithRedirect', 'signOut']); // لا شيء زيادة (لا Email)
+  assert.deepEqual(imp, ['GoogleAuthProvider', 'createUserWithEmailAndPassword', 'getAuth', 'getRedirectResult', 'onAuthStateChanged', 'sendPasswordResetEmail', 'signInWithEmailAndPassword', 'signInWithPopup', 'signInWithRedirect', 'signOut']); // Google + بريد/كلمة مرور فقط (لا email link ولا غيره)
   assert.match(fb, /new GoogleAuthProvider\(\)/); assert.match(fb, /prompt: 'select_account'/);
   const a = R('js/auth.js'); const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export async function loginGoogleRedirect()'));
-  assert.match(lg, /await signInWithPopup\(auth, gProvider\)/);
+  assert.match(lg, /await afterCredential\(await signInWithPopup\(auth, gProvider\)\)/);
   // signInWithPopup لازم تكون أول await داخل الـ click handler (وإلا المتصفح يحجب النافذة)
-  assert.doesNotMatch(lg.slice(0, lg.indexOf('await signInWithPopup(')), /\bawait\b/);
+  assert.doesNotMatch(lg.slice(0, lg.indexOf('await afterCredential(await signInWithPopup(')), /\bawait\b/);
   assert.doesNotMatch(lg, /signInWithRedirect/);               // المسار الأساسي ما بيستخدمش redirect
   const rd = a.slice(a.indexOf('export async function loginGoogleRedirect()')); assert.match(rd, /await signInWithRedirect\(auth, gProvider\)/); assert.match(rd, /REDIRECT_PENDING_KEY, String\(Date\.now\(\)\)/);
   const m = R('js/main.js'); assert.match(m, /getRedirectResult\(auth\)/); assert.match(m, /onAuthStateChanged\(auth, async user =>/);
@@ -31,7 +40,8 @@ test('Google Auth: popup is the primary flow, redirect kept only as explicit fal
 test('no race / no silent return: signed-out branch awaits redirect result, uses signedOutOutcome, resets UI, never leaves loading', () => {
   const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
   assert.match(h, /await withTimeout\(redirectSettled/); assert.match(h, /signedOutOutcome\(\{ currentUser: auth\.currentUser/); assert.match(h, /if \(out\.action === 'ignore'\) return;/);
-  assert.match(h, /hideLoading\(\); resetLoginState\(\); clearRedirectPending\(\);/); assert.match(h, /if \(out\.error\) showLoginError\(out\.error\)/);
+  assert.match(h, /hideLoading\(\); resetLoginState\(\);\s*\n\s*const keep = [^\n]*peekEntryType\(\)[^\n]*\n\s*clearRedirectPending\(\); clearEntryIntent\(\);/); // keep قبل clearRedirectPending (تخزين الدور يُعتمد أثناء redirect فقط)
+  assert.match(h, /takeExpectedSignOut\(\) \|\| isAuthOpActive\(\)/); assert.ok(h.indexOf('takeExpectedSignOut()') < h.indexOf('await withTimeout(') && h.lastIndexOf('takeExpectedSignOut()') > h.indexOf('await withTimeout('), 'الفحص قبل وبعد الانتظار'); assert.match(h, /if \(out\.error\) showLoginError\(out\.error\)/);
   assert.match(h, /if \(user\) \{\s*const attempt = captureLoginIntent\(\);[^\n]*\n\s*resetLoginState\(\); clearRedirectPending\(\);/);   // نجاح فعلي => فك الزر
   assert.match(m, /const redirectSettled = getRedirectResult\(auth\)\.catch/);                // النتيجة بتتستنّى مش بتتهمل
   const a = R('js/auth.js'); assert.match(a, /SESSION_NOT_READY/); assert.match(a, /setTimeout\(\(\) => \{ if \(!window\.CU\)/); // لا loading عالق بعد نجاح popup
@@ -41,12 +51,13 @@ test('logout resets login screen state; user is "logged in" only from onAuthStat
   assert.match(lo, /await signOut\(auth\)/); assert.match(lo, /resetLoginState\(\)/); assert.match(lo, /clearRedirectPending\(\)/);
   const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export async function loginGoogleRedirect()')); assert.doesNotMatch(lg, /window\.CU\s*=[^=]/);
 });
-test('3 stages: home (screen-entry) -> role pick -> Google login screen; Google-only, no legacy UI', () => {
+test('3 stages: home (screen-entry) -> role pick -> login screen (Google + email form); no legacy UI', () => {
   const html = R('index.html');
   const home = html.slice(html.indexOf('id="screen-entry"'), html.indexOf('id="screen-role-pick"'));
   const pick = html.slice(html.indexOf('id="screen-role-pick"'), html.indexOf('id="screen-login"'));
-  const login = html.slice(html.indexOf('id="screen-login"'), html.indexOf('id="screen-role-select"'));
-  assert.doesNotMatch(html, /type="(email|password)"|auth-tab|lmail|lpass|login-btn|legacy-login|auth-register|id="screen-auth"|id="screen-otp"|otp-email|otp-card/i); assert.doesNotMatch(html, /id="[^"]*apple|onclick="[^"]*apple/i); // لا زر Apple
+  const login = html.slice(html.indexOf('id="screen-login"'), html.indexOf('id="screen-signup"'));
+  assert.doesNotMatch(home + pick, /type="(email|password)"/); // لا حقول بريد/كلمة مرور في الرئيسية أو اختيار النوع
+  assert.doesNotMatch(html, /auth-tab|lmail|lpass|login-btn|legacy-login|auth-register|id="screen-auth"|id="screen-otp"|otp-email|otp-card/i); assert.doesNotMatch(html, /id="[^"]*apple|onclick="[^"]*apple/i); // لا زر Apple
   // 1) الصفحة الرئيسية: هوية + خدمات + زر بدء، ولا زر Google ولا اختيار دور هنا
   for (const t of ['MATLAB<span>K</span>', 'خدماتك أقرب إليك', 'توصيل الطلبات', 'المشاوير', 'خدمات محلية']) assert.ok(home.includes(t), t);
   assert.match(home, /id="home-start"[^>]*onclick="openRolePick\(\)"/); assert.doesNotMatch(home, /loginGoogle|id="lg-google"/);
@@ -66,7 +77,7 @@ test('3 stages: home (screen-entry) -> role pick -> Google login screen; Google-
 });
 test('login UX: loading blocks double-click, errors inline (no Toast), offline guard, bfcache reset', () => {
   const a = R('js/auth.js');
-  assert.match(a, /if \(!authLockStart\(\)\) return;/); assert.match(a, /b\.disabled = on/); assert.match(a, /aria-busy/); assert.match(a, /is-loading/);
+  assert.match(a, /if \(!authLockStart\(\)\) return;/); assert.match(a, /b\.disabled = !!on/); assert.match(a, /aria-busy/); assert.match(a, /is-loading/);
   assert.match(a, /navigator\.onLine === false/); assert.match(a, /pageshow/); assert.match(a, /ev\.persisted/);
   assert.doesNotMatch(a, /showToast\(firebaseAuthErrorMessage/); assert.match(R('js/main.js'), /showLoginError\(firebaseAuthErrorMessage\(e\)\)/); assert.match(a, /describeAuthError/);
 });
@@ -74,19 +85,24 @@ test('role gate: intent saved before Google; one shared gate (evaluateRoleGate) 
   const a = R('js/auth.js'); assert.match(a, /status: role === 'customer' \? STATUS\.ACTIVE : STATUS\.INCOMPLETE/);
   assert.doesNotMatch(a, /pickEntryType|ENTRY_MODES/);
   // 1) الدور يُحفظ قبل Google وبشكل متزامن (قبل أول await)، ولا افتراض "عميل" عند غياب الاختيار
-  const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export function openRolePick'));
-  assert.ok(lg.indexOf('setEntryIntent(role)') > 0 && lg.indexOf('setEntryIntent(role)') < lg.indexOf('await signInWithPopup('));
+  const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('// ===== المصادقة بالبريد الإلكتروني'));
+  assert.ok(lg.indexOf('setEntryIntent(role)') > 0 && lg.indexOf('setEntryIntent(role)') < lg.indexOf('await afterCredential(await signInWithPopup('));
   assert.match(lg, /if \(!INTENT_ROLES\.includes\(role\)\) \{ openRolePick\(\); showLoginError\(MSG_ROLE_REQUIRED\); return; \}/);
   assert.doesNotMatch(lg, /: 'customer'/);
   // 2) نفس المستخدم داخل بالفعل => نفس البوابة (قراءة طازجة)
-  assert.match(lg, /await handleSignedIn\(cred\.user, captureLoginIntent\(\)\)/);
+  const ac = a.slice(a.indexOf('async function afterCredential('), a.indexOf('let _busyWhich'));
+  assert.match(ac, /await handleSignedIn\(cred\.user, captureLoginIntent\(\)\)/); assert.match(ac, /if \(!_loginInFlight\) return;/);
+  // مسار البريد: نفس البوابة والدور محفوظ قبل أي طلب Firebase، ولا افتراض عميل
+  const em = a.slice(a.indexOf('export async function emailLogin('), a.indexOf('export function openSignup'));
+  for (const [fn, call] of [['emailLogin', 'await signInWithEmailAndPassword('], ['emailSignup', 'await createUserWithEmailAndPassword(']]) { const f = em.slice(em.indexOf('export async function ' + fn)); assert.ok(f.indexOf('setEntryIntent(role)') > 0 && f.indexOf('setEntryIntent(role)') < f.indexOf(call), fn); assert.match(f, /const role = _chosenRole\(\); if \(!role\) return;/); }
+  assert.doesNotMatch(em, /: 'customer'|routeUser\(|window\.CUD\s*=[^=]|window\.CU\s*=[^=]/); // لا توجيه ولا تعيين مستخدم من مسار البريد: البوابة فقط
   // 3) main.js: بوابة واحدة، والتقاط الدور قبل أي تصفير، ولا توجيه مباشر هناك
   const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
   assert.match(h, /await handleSignedIn\(user, attempt\)/); assert.doesNotMatch(h, /routeUser\(\)|getDoc\(/);
   // 4) البوابة: القراءة -> evaluateRoleGate -> (رفض | تسجيل | توجيه)؛ CUD لا يُحمَّل قبل القرار
   const g = a.slice(a.indexOf('export async function handleSignedIn('), a.indexOf('export function retryLoadAccount'));
   assert.ok(g.indexOf('evaluateRoleGate(') < g.indexOf('window.CUD = data;')); assert.ok(g.indexOf('window.CUD = data;') < g.indexOf('routeUser();'));
-  assert.match(g, /window\.CU = user; window\.CUD = null;/); assert.match(g, /MSG_USER_LOAD_FAILED, \{ retry: true \}/);
+  assert.match(g, /window\.CU = user; window\.CUD = null;/); assert.match(g, /withCode\(MSG_USER_LOAD_FAILED, e\), \{ retry: true \}/);
   // 5) routeUser fail-closed قبل تحميل أي بيانات
   const ru = a.slice(a.indexOf('export function routeUser()'), a.indexOf('// MATLABK: التوجيه من الحالة الفعلية'));
   assert.match(ru, /target === 'unknown'\) \{ rejectRoleMismatch\(MSG_INVALID_ROLE/); assert.ok(ru.indexOf("'unknown'") < ru.indexOf('startNotifListener()'));

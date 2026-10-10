@@ -5,7 +5,7 @@
   "scripts": {
     "test": "firebase emulators:exec --config ../firebase.json --project go-elmanayef --only firestore \"node --test firestore.rules.test.mjs\"",
     "contract": "node --test schema-contract.test.mjs",
-    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs"
+    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs email-auth.test.mjs auth-e2e.test.mjs auth-reopen.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^3.0.0",

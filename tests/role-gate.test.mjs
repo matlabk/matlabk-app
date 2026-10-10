@@ -69,7 +69,7 @@ test('7. تسجيل الخروج: إنهاء الجلسة + الصفحة الر�
   assert.equal(t.currentUser, null); assert.equal(t.signOuts, 1); assert.equal(t.screens.at(-1), 'screen-entry');
   assert.equal(window.CUD, null); assert.equal(window.selectedType, null); assert.equal(sessionStorage.getItem('matlabk_entry_type'), null);
   assert.deepEqual(t.users[USER.uid], CUSTOMER); assert.equal(t.writes.length, 0);
-  assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false });
+  assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false, method: 'google' });
 });
 
 // 8) الدور القديم لا يبقى عالقًا
@@ -83,7 +83,7 @@ test('8b. إلغاء نافذة Google: الدور المختار يُمسح (ل
   T().users[USER.uid] = CUSTOMER; A.openLogin('driver');
   T().popup = async () => { throw Object.assign(new Error('x'), { code: 'auth/popup-closed-by-user' }); };
   await A.loginGoogle();
-  assert.equal(sessionStorage.getItem('matlabk_entry_type'), null); assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false });
+  assert.equal(sessionStorage.getItem('matlabk_entry_type'), null); assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false, method: 'google' });
   assert.match(errText(), /تم إغلاق نافذة Google/); assert.equal($('lg-google').disabled, false);
 });
 test('8c. دور مختار منتهي الصلاحية (>10 دقائق) في تخزين الجلسة يُتجاهل', () => {
