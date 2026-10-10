@@ -118,7 +118,7 @@
       </button>
       <p id="lg-role-note" class="lg-note"></p>
       <div class="em-div" role="separator" aria-label="أو"><span>أو</span></div>
-      <form class="em-form" id="em-form" novalidate onsubmit="emailLogin(event)">
+      <form class="em-form" id="em-form" novalidate onsubmit="event.preventDefault();emailLogin(event)">
         <label class="em-label" for="em-email">البريد الإلكتروني</label>
         <input class="em-input" id="em-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
         <label class="em-label" for="em-pass">كلمة المرور</label>
@@ -145,7 +145,7 @@
       <h1 class="rp-title">إنشاء حساب جديد</h1>
       <p class="lg-sub">بالبريد الإلكتروني وكلمة المرور</p>
     </header>
-    <form class="em-form" id="su-form" novalidate onsubmit="emailSignup(event)">
+    <form class="em-form" id="su-form" novalidate onsubmit="event.preventDefault();emailSignup(event)">
       <label class="em-label" for="su-email">البريد الإلكتروني</label>
       <input class="em-input" id="su-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
       <label class="em-label" for="su-pass">كلمة المرور (8 أحرف على الأقل)</label>
@@ -167,7 +167,7 @@
       <h1 class="rp-title">استعادة كلمة المرور</h1>
       <p class="lg-sub">اكتب بريدك الإلكتروني وسنرسل لك رابط إعادة التعيين</p>
     </header>
-    <form class="em-form" id="fg-form" novalidate onsubmit="emailReset(event)">
+    <form class="em-form" id="fg-form" novalidate onsubmit="event.preventDefault();emailReset(event)">
       <label class="em-label" for="fg-email">البريد الإلكتروني</label>
       <input class="em-input" id="fg-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
       <button type="submit" id="fg-submit" class="em-submit"><span id="fg-submit-label">إرسال رابط الاستعادة</span><span class="lg-spin" aria-hidden="true"></span></button>
@@ -1293,6 +1293,11 @@
 </div>
 
 <!-- ===== SCRIPTS ===== -->
+<script>
+  // حارس نماذج المصادقة (يعمل حتى لو فشل تحميل وحدات JS): إرسال النموذج الأصلي يعيد تحميل الصفحة ويضع البريد وكلمة المرور في الرابط.
+  // نمنعه دائمًا؛ المعالج الفعلي (onsubmit) هو اللي ينفّذ الدخول.
+  document.addEventListener('submit', function (e) { var t = e.target; if (t && t.classList && t.classList.contains('em-form')) e.preventDefault(); }, true);
+</script>
 <script type="module" src="js/firebase.js"></script>
 <script type="module" src="js/main.js"></script>
 

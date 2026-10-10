@@ -1,0 +1,637 @@
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/index.html proj/index.html
+--- orig/index.html	2026-10-10 02:14:01.000000000 +0000
++++ proj/index.html	2026-10-10 08:22:28.736658672 +0000
+@@ -118,7 +118,7 @@
+       </button>
+       <p id="lg-role-note" class="lg-note"></p>
+       <div class="em-div" role="separator" aria-label="أو"><span>أو</span></div>
+-      <form class="em-form" id="em-form" novalidate onsubmit="emailLogin(event)">
++      <form class="em-form" id="em-form" novalidate onsubmit="event.preventDefault();emailLogin(event)">
+         <label class="em-label" for="em-email">البريد الإلكتروني</label>
+         <input class="em-input" id="em-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+         <label class="em-label" for="em-pass">كلمة المرور</label>
+@@ -145,7 +145,7 @@
+       <h1 class="rp-title">إنشاء حساب جديد</h1>
+       <p class="lg-sub">بالبريد الإلكتروني وكلمة المرور</p>
+     </header>
+-    <form class="em-form" id="su-form" novalidate onsubmit="emailSignup(event)">
++    <form class="em-form" id="su-form" novalidate onsubmit="event.preventDefault();emailSignup(event)">
+       <label class="em-label" for="su-email">البريد الإلكتروني</label>
+       <input class="em-input" id="su-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+       <label class="em-label" for="su-pass">كلمة المرور (8 أحرف على الأقل)</label>
+@@ -167,7 +167,7 @@
+       <h1 class="rp-title">استعادة كلمة المرور</h1>
+       <p class="lg-sub">اكتب بريدك الإلكتروني وسنرسل لك رابط إعادة التعيين</p>
+     </header>
+-    <form class="em-form" id="fg-form" novalidate onsubmit="emailReset(event)">
++    <form class="em-form" id="fg-form" novalidate onsubmit="event.preventDefault();emailReset(event)">
+       <label class="em-label" for="fg-email">البريد الإلكتروني</label>
+       <input class="em-input" id="fg-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+       <button type="submit" id="fg-submit" class="em-submit"><span id="fg-submit-label">إرسال رابط الاستعادة</span><span class="lg-spin" aria-hidden="true"></span></button>
+@@ -1293,6 +1293,11 @@
+ </div>
+ 
+ <!-- ===== SCRIPTS ===== -->
++<script>
++  // حارس نماذج المصادقة (يعمل حتى لو فشل تحميل وحدات JS): إرسال النموذج الأصلي يعيد تحميل الصفحة ويضع البريد وكلمة المرور في الرابط.
++  // نمنعه دائمًا؛ المعالج الفعلي (onsubmit) هو اللي ينفّذ الدخول.
++  document.addEventListener('submit', function (e) { var t = e.target; if (t && t.classList && t.classList.contains('em-form')) e.preventDefault(); }, true);
++</script>
+ <script type="module" src="js/firebase.js"></script>
+ <script type="module" src="js/main.js"></script>
+ 
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/js/auth-flow.js proj/js/auth-flow.js
+--- orig/js/auth-flow.js	2026-10-10 02:14:01.000000000 +0000
++++ proj/js/auth-flow.js	2026-10-10 12:57:13.279958291 +0000
+@@ -54,6 +54,10 @@
+ 
+ export function describeAuthError(e, { online = true, method = 'google' } = {}) {
+   if (online === false) return { message: OFFLINE_ERROR, silent: false, offerRedirect: false };
++  // أخطاء إعدادات المشروع (قيود مفتاح API على النطاق، مفتاح غير صالح، تطبيق غير مصرّح...): تؤثر على كل طرق الدخول معًا. رسالة تفرّق بينها
++  // وبين "خطأ غير متوقع" (الرمز الأصلي يظهر في وضع التشخيص وفي console).
++  const code = e && e.code;
++  if (typeof code === 'string' && (/^auth\/requests-from-referer-/.test(code) || CONFIG_ERROR_CODES.has(code))) return { message: CONFIG_ERROR, silent: false, offerRedirect: false };
+   // رسائل البريد/كلمة المرور لها الأولوية في مسار البريد (operation-not-allowed و too-many-requests بنصوص تناسبه)؛ مسار Google بلا تغيير.
+   const hit = (method === 'email' && EMAIL_TABLE[e && e.code]) || TABLE[e && e.code];
+   return hit ? { silent: false, offerRedirect: false, ...hit } : { message: GENERIC_ERROR, silent: false, offerRedirect: false };
+@@ -92,6 +96,10 @@
+ export const MSG_USER_LOAD_FAILED = 'تعذّر تحميل بيانات حسابك. تأكد من الاتصال ثم اضغط «إعادة المحاولة».';
+ export const MSG_INVALID_ROLE = 'بيانات حسابك غير مكتملة أو غير صالحة، ولا يمكن فتح أي لوحة الآن. تواصل مع الدعم لمراجعة الحساب.';
+ export const MSG_INTENT_MISSING = 'لم نتمكن من تحديد نوع الحساب الذي اخترته. اختر نوع الحساب ثم سجّل الدخول مرة أخرى.';
++const CONFIG_ERROR_CODES = new Set(['auth/invalid-api-key', 'auth/api-key-not-valid.-please-pass-a-valid-api-key.', 'auth/app-not-authorized', 'auth/configuration-not-found', 'auth/project-not-found', 'auth/invalid-app-credential', 'auth/app-not-installed']);
++export const CONFIG_ERROR = 'تعذّر الاتصال بخدمة تسجيل الدخول بسبب إعدادات الخدمة. أبلغ الدعم بهذه المشكلة.';
++export const OP_TIMEOUT_ERROR = 'استغرقت العملية وقتًا أطول من المعتاد. تأكد من الاتصال ثم حاول مرة أخرى.';
++export const MSG_PROFILE_CREATE_FAILED = 'تم إنشاء حسابك لكن تعذّر حفظ بياناته. اضغط «إعادة المحاولة».';
+ export const MSG_ROLE_REQUIRED = 'اختر نوع الحساب أولًا (عميل أو تاجر أو كابتن).';
+ 
+ // رسالة التعارض. لا نكشف شيئًا عن حساب الإدارة (نص عام) - صاحب الحساب الحقيقي فقط هو اللي وصل لهنا بعد Google.
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/js/auth.js proj/js/auth.js
+--- orig/js/auth.js	2026-10-10 02:14:01.000000000 +0000
++++ proj/js/auth.js	2026-10-10 12:55:18.401871512 +0000
+@@ -1,7 +1,7 @@
+ // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
+ 
+ import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from './firebase.js';
+-import { INTENT_ROLES, INTENT_TTL_MS, RESET_SENT, isValidEmail, normalizeEmail, validateEmailLogin, validateSignup, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
++import { INTENT_ROLES, INTENT_TTL_MS, RESET_SENT, OP_TIMEOUT_ERROR, MSG_PROFILE_CREATE_FAILED, isValidEmail, normalizeEmail, validateEmailLogin, validateSignup, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
+ import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
+ import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
+ 
+@@ -18,14 +18,16 @@
+ }
+ export function peekEntryType() {
+   if (_pendingIntent && Date.now() - _pendingIntent.ts <= INTENT_TTL_MS) return _pendingIntent.type;
+-  try { return decodeIntent(sessionStorage.getItem(ENTRY_TYPE_KEY)); } catch(e) { return null; }
++  // sessionStorage لا يُعتمد إلا عند العودة من redirect (الصفحة اتعمّلها reload عن قصد). غير كده أي قيمة متبقية من محاولة قديمة
++  // (إعادة تحميل أثناء نافذة Google...) لا تُعامَل كدخول جديد ولا تطرد جلسة مستعادة سليمة.
++  try { return hasRedirectPending() ? decodeIntent(sessionStorage.getItem(ENTRY_TYPE_KEY)) : null; } catch(e) { return null; }
+ }
+ export function clearEntryIntent() { _pendingIntent = null; _loginInFlight = false; _loginMethod = 'google'; try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {} }
+ export function takeEntryType() { const t = peekEntryType(); clearEntryIntent(); return t; }
+ // بيتنادى أول حاجة في onAuthStateChanged(user): يلتقط (الدور المختار + هل ده دخول جديد؟) ويصفّر الحالة المعلّقة.
+ export function captureLoginIntent() {
+   const fresh = _loginInFlight || hasRedirectPending() || peekEntryType() !== null;
+-  const method = _loginMethod;
++  const method = _loginMethod; _lastMethod = method;
+   return { intent: takeEntryType(), fresh, method };
+ }
+ import { clearAllListeners, setLoad, showScreen, showToast } from './utils.js';
+@@ -50,12 +52,26 @@
+ // قفل واحد بسيط يمنع تشغيل أكتر من عملية Authentication (Google/Email Login/Register/Reset)
+ // في نفس اللحظة - بيتفعّل مع أول عملية وبيتحرر تلقائيًا لما تخلص (نجاح أو فشل).
+ let _authOpInProgress = false;
++let _authOpTimer = null;
++// مهلة أقصى لأي عملية مصادقة معلّقة (نافذة Google عالقة، شبكة لا ترد...): بعدها تُفك الأزرار وتظهر رسالة، بدل تجمّد كل الأزرار بدون تفسير.
++// لا نمسح الدور المختار هنا: لو وصلت النتيجة المتأخرة تُعالَج بنفس بوابة الدور (لا تمرير صامت).
++const authOpTimeoutMs = () => (Number.isFinite(window.AUTH_OP_TIMEOUT_MS) ? window.AUTH_OP_TIMEOUT_MS : 45000);
+ function authLockStart() {
+   if (_authOpInProgress) return false;
+   _authOpInProgress = true;
++  clearTimeout(_authOpTimer);
++  // عند انتهاء المهلة يبقى الدور المختار (صلاحية 10 دقائق): أي نتيجة متأخرة تمر على البوابة بدل ما تتعامل كجلسة مستعادة.
++  _authOpTimer = setTimeout(() => { if (_authOpInProgress) { console.warn('[auth] operation timed out'); _loginInFlight = false; resetLoginState(); showLoginError(OP_TIMEOUT_ERROR); } }, authOpTimeoutMs());
+   return true;
+ }
+-function authLockEnd() { _authOpInProgress = false; }
++function authLockEnd() { _authOpInProgress = false; clearTimeout(_authOpTimer); _authOpTimer = null; }
++export function isAuthOpActive() { return _authOpInProgress || _loginInFlight; }
++// تسجيل خروج متعمَّد من التطبيق (doLogout/رفض الدور): مستمع "مفيش مستخدم" في main.js لا يعيد التوجيه/يمسح الحالة لما يوصله حدث الخروج ده.
++let _expectSignOutUntil = 0;
++export function takeExpectedSignOut() { const ok = Date.now() < _expectSignOutUntil; _expectSignOutUntil = 0; return ok; }
++// وضع التشخيص (لا يعرض أسرارًا): يضيف رمز خطأ Firebase للرسالة. يُفعَّل بـ window.DEBUG_ERRORS=true أو localStorage.matlabk_debug_auth='1'.
++function authDebugOn() { try { return window.DEBUG_ERRORS === true || localStorage.getItem('matlabk_debug_auth') === '1'; } catch(e) { return window.DEBUG_ERRORS === true; } }
++const withCode = (msg, e) => (authDebugOn() && e && e.code ? msg + ' [' + e.code + ']' : msg);
+ 
+ // ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
+ // كل أزرار المصادقة (Google/بريد/إنشاء/استعادة): زر واحد فقط يظهر عليه التحميل، والباقي يتعطل أثناء أي عملية معلّقة.
+@@ -83,6 +99,7 @@
+ const REDIRECT_PENDING_KEY = 'matlabk_redirect_pending'; // يُكتب قبل أي تحويل redirect، المسار البديل فقط
+ export function hasRedirectPending() { try { return isRedirectPendingValid(sessionStorage.getItem(REDIRECT_PENDING_KEY)); } catch(e) { return false; } }
+ export function clearRedirectPending() { try { sessionStorage.removeItem(REDIRECT_PENDING_KEY); } catch(e) {} }
++try { if (!hasRedirectPending()) sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) { /* تخزين غير متاح: لا يوجد شيء متبقٍ أصلًا */ }
+ export function showLoginError(msg, { retry = false } = {}) {
+   // نفس الرسالة في شاشة الدخول والصفحة الرئيسية (اللي ظاهرة منهم هي اللي يشوفها المستخدم) - مفيش رسالة تضيع.
+   for (const id of ['err-msg', 'home-err', 'su-err', 'fg-err']) { const e = document.getElementById(id); if (e) { e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none'; if (msg && e.scrollIntoView) { try { e.scrollIntoView({ block: 'nearest' }); } catch(x) {} } } }
+@@ -138,7 +155,7 @@
+     clearEntryIntent();
+     resetLoginState();
+     const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
+-    if (!d.silent) showLoginError(d.message);
++    if (!d.silent) showLoginError(withCode(d.message, e));
+     if (d.offerRedirect) showAltLogin(true);
+     console.warn('[auth] popup sign-in failed:', e?.code || e);
+   }
+@@ -172,7 +189,7 @@
+   } catch(e) {
+     clearEntryIntent(); resetLoginState();
+     const pw = document.getElementById('em-pass'); if (pw) pw.value = '';
+-    showLoginError(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message);
++    showLoginError(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e));
+     console.warn('[auth] email sign-in failed:', e?.code || 'unknown');
+   }
+ }
+@@ -194,7 +211,7 @@
+   } catch(e) {
+     clearEntryIntent(); resetLoginState();
+     for (const id of ['su-pass', 'su-pass2']) { const x = document.getElementById(id); if (x) x.value = ''; }
+-    showLoginError(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message);
++    showLoginError(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e));
+     console.warn('[auth] email sign-up failed:', e?.code || 'unknown');
+   }
+ }
+@@ -214,7 +231,7 @@
+   } catch(e) {
+     // مسجّل/غير مسجّل: نفس الرد المحايد. باقي الأخطاء (صيغة/اتصال/محاولات كثيرة) رسائل عربية واضحة.
+     if (e?.code === 'auth/user-not-found') { done(RESET_SENT, false); return; }
+-    done(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, true);
++    done(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e), true);
+     console.warn('[auth] reset-email failed:', e?.code || 'unknown');
+   }
+ }
+@@ -278,7 +295,8 @@
+   clearAuthForms(); clearEntryIntent(); _lastAttempt = null; // الدور المختار القديم لا يبقى عالقًا بعد الخروج
+   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
+   window.CUD = null; window.CU = null; window.uploadedDocs = {};
+-  try { await signOut(auth); } catch(e) {}
++  if (auth.currentUser) _expectSignOutUntil = Date.now() + 5000; // الحدث الناتج عن هذا الخروج لا يعيد التوجيه من main.js
++  try { await signOut(auth); } catch(e) { console.warn('[auth] signOut failed:', e?.code || 'unknown'); }
+   window.selectedType = null; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
+   showScreen('screen-entry');
+ }
+@@ -338,7 +356,11 @@
+     else if (role === 'merchant') showScreen('screen-complete-merchant');
+     else routeUser();
+   } catch(e) {
+-    showToast('حدث خطأ، حاول مرة أخرى','err');
++    // حساب Firebase اتعمل لكن ملف المستخدم لم يُحفظ (قواعد/شبكة): لا نبتلع الخطأ. نسجّل الرمز، ونرجّع المستخدم لشاشة الدور
++    // برسالة واضحة + إعادة محاولة بنفس الدور (completeRegistration idempotent: لو المستند اتعمل لا يتكرر ولا يتغير الدور).
++    console.error('[auth] profile creation failed:', e?.code || 'unknown');
++    _lastAttempt = { intent: role, fresh: true, method: _lastMethod };
++    openLogin(role); showLoginError(withCode(MSG_PROFILE_CREATE_FAILED, e), { retry: true });
+   } finally {
+     _registrationInProgress = false;
+     document.querySelectorAll('#screen-role-select .role-btn').forEach(b => b.style.pointerEvents = '');
+@@ -413,7 +435,8 @@
+ // ===== بوابة الدور: تُنفَّذ بعد تأكيد Firebase للجلسة، وقبل تحميل أي بيانات خاصة بدور أو فتح أي لوحة =====
+ // مسار واحد لكل حالات الدخول: popup / redirect / استعادة جلسة / نفس المستخدم داخل بالفعل.
+ // attempt = { intent, fresh } من captureLoginIntent(). المصدر الوحيد للدور الفعلي: users/{uid} في Firestore.
+-let _lastAttempt = null; // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
++let _lastAttempt = null;
++let _lastMethod = 'google'; // طريقة آخر دخول التقطه captureLoginIntent (لإعادة المحاولة) // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
+ export async function handleSignedIn(user, attempt = {}) {
+   const intent = attempt.intent || null, fresh = !!attempt.fresh, method = attempt.method === 'email' ? 'email' : 'google';
+   window.CU = user; window.CUD = null; // لا لوحة تُفتح قبل ما الدور يتأكد
+@@ -428,7 +451,7 @@
+     _lastAttempt = { intent, fresh, method }; window.CUD = null;
+     hideLoading();
+     if (fresh && INTENT_ROLES.includes(intent)) openLogin(intent); else showScreen('screen-entry');
+-    showLoginError(MSG_USER_LOAD_FAILED, { retry: true });
++    showLoginError(withCode(MSG_USER_LOAD_FAILED, e), { retry: true });
+     return;
+   }
+   _lastAttempt = null;
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/js/main.js proj/js/main.js
+--- orig/js/main.js	2026-10-10 02:14:01.000000000 +0000
++++ proj/js/main.js	2026-10-10 12:51:42.180570827 +0000
+@@ -13,7 +13,7 @@
+ import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
+ import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
+ import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
+-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, emailLogin, emailSignup, emailReset, openSignup, openForgot, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
++import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, isAuthOpActive, takeExpectedSignOut, emailLogin, emailSignup, emailReset, openSignup, openForgot, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
+ import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
+ import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
+ import { renderIcons } from './icons.js';
+@@ -129,14 +129,21 @@
+       showScreen('screen-entry'); showLoginError(firebaseAuthErrorMessage(e));
+     }
+   } else {
++    // حدث "مفيش مستخدم" لا يعيد التوجيه ولا يمسح الدور المختار في حالتين: (1) خروج متعمَّد من التطبيق (doLogout/رفض دور) - الشاشة والحالة
++    // اتظبطوا هناك، وتوقيت وصول الحدث بالنسبة لـ signOut يختلف حسب الـ SDK. (2) عملية دخول/إنشاء حساب جارية (خروج من تاب تاني، إلخ) -
++    // نتيجتها هي اللي توجّه. قبل كده الحدث المتأخر كان يرجّع المستخدم للرئيسية ويمسح الدور (فيروح لاحقًا لشاشة اختيار دور أو لوحة بالدور المخزّن).
++    if (takeExpectedSignOut() || isAuthOpActive()) { window.CU = null; window.CUD = null; hideLoading(); return; }
+     // MATLABK: "مفيش مستخدم" مش نهائي إلا بعد ما getRedirectResult يخلّص (منع race بين النتيجتين). لو كنا بادئين redirect نستنى أطول.
+     const pending = hasRedirectPending();
+     await withTimeout(redirectSettled, pending ? 12000 : 3000);
++    // أثناء الانتظار ممكن تبدأ عملية دخول أو يحصل خروج متعمَّد: نعيد الفحص قبل أي توجيه/مسح حالة.
++    if (isAuthOpActive() || takeExpectedSignOut()) { window.CU = null; window.CUD = null; hideLoading(); return; }
+     const out = signedOutOutcome({ currentUser: auth.currentUser, redirectPending: pending, existingError: redirectErrorShown });
+     if (out.action === 'ignore') return; // الجلسة اتأكدت فعليًا - الـ callback الخاص بالمستخدم هو اللي بيوجّه
+     window.CU = null; window.CUD = null;
+-    hideLoading(); resetLoginState(); clearRedirectPending();
+-    const keep = out.error ? peekEntryType() : null; clearEntryIntent();
++    hideLoading(); resetLoginState();
++    const keep = out.error ? peekEntryType() : null; // قبل clearRedirectPending: تخزين الدور المختار يُعتمد فقط أثناء redirect
++    clearRedirectPending(); clearEntryIntent();
+     if (keep) openLogin(keep); else showScreen('screen-entry');
+     if (out.error) showLoginError(out.error); // رجوع من Google بدون جلسة: رسالة واضحة بدل الرجوع الصامت لشاشة الدخول
+   }
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/auth-contract.test.mjs proj/tests/auth-contract.test.mjs
+--- orig/tests/auth-contract.test.mjs	2026-10-10 02:14:01.000000000 +0000
++++ proj/tests/auth-contract.test.mjs	2026-10-10 12:53:54.577811952 +0000
+@@ -40,7 +40,8 @@
+ test('no race / no silent return: signed-out branch awaits redirect result, uses signedOutOutcome, resets UI, never leaves loading', () => {
+   const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
+   assert.match(h, /await withTimeout\(redirectSettled/); assert.match(h, /signedOutOutcome\(\{ currentUser: auth\.currentUser/); assert.match(h, /if \(out\.action === 'ignore'\) return;/);
+-  assert.match(h, /hideLoading\(\); resetLoginState\(\); clearRedirectPending\(\);/); assert.match(h, /if \(out\.error\) showLoginError\(out\.error\)/);
++  assert.match(h, /hideLoading\(\); resetLoginState\(\);\s*\n\s*const keep = [^\n]*peekEntryType\(\)[^\n]*\n\s*clearRedirectPending\(\); clearEntryIntent\(\);/); // keep قبل clearRedirectPending (تخزين الدور يُعتمد أثناء redirect فقط)
++  assert.match(h, /takeExpectedSignOut\(\) \|\| isAuthOpActive\(\)/); assert.ok(h.indexOf('takeExpectedSignOut()') < h.indexOf('await withTimeout(') && h.lastIndexOf('takeExpectedSignOut()') > h.indexOf('await withTimeout('), 'الفحص قبل وبعد الانتظار'); assert.match(h, /if \(out\.error\) showLoginError\(out\.error\)/);
+   assert.match(h, /if \(user\) \{\s*const attempt = captureLoginIntent\(\);[^\n]*\n\s*resetLoginState\(\); clearRedirectPending\(\);/);   // نجاح فعلي => فك الزر
+   assert.match(m, /const redirectSettled = getRedirectResult\(auth\)\.catch/);                // النتيجة بتتستنّى مش بتتهمل
+   const a = R('js/auth.js'); assert.match(a, /SESSION_NOT_READY/); assert.match(a, /setTimeout\(\(\) => \{ if \(!window\.CU\)/); // لا loading عالق بعد نجاح popup
+@@ -101,7 +102,7 @@
+   // 4) البوابة: القراءة -> evaluateRoleGate -> (رفض | تسجيل | توجيه)؛ CUD لا يُحمَّل قبل القرار
+   const g = a.slice(a.indexOf('export async function handleSignedIn('), a.indexOf('export function retryLoadAccount'));
+   assert.ok(g.indexOf('evaluateRoleGate(') < g.indexOf('window.CUD = data;')); assert.ok(g.indexOf('window.CUD = data;') < g.indexOf('routeUser();'));
+-  assert.match(g, /window\.CU = user; window\.CUD = null;/); assert.match(g, /MSG_USER_LOAD_FAILED, \{ retry: true \}/);
++  assert.match(g, /window\.CU = user; window\.CUD = null;/); assert.match(g, /withCode\(MSG_USER_LOAD_FAILED, e\), \{ retry: true \}/);
+   // 5) routeUser fail-closed قبل تحميل أي بيانات
+   const ru = a.slice(a.indexOf('export function routeUser()'), a.indexOf('// MATLABK: التوجيه من الحالة الفعلية'));
+   assert.match(ru, /target === 'unknown'\) \{ rejectRoleMismatch\(MSG_INVALID_ROLE/); assert.ok(ru.indexOf("'unknown'") < ru.indexOf('startNotifListener()'));
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/auth-e2e.test.mjs proj/tests/auth-e2e.test.mjs
+--- orig/tests/auth-e2e.test.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/auth-e2e.test.mjs	2026-10-10 12:52:28.517237934 +0000
+@@ -0,0 +1,155 @@
++// node --test tests/auth-e2e.test.mjs
++// تشغيل كامل للتطبيق (js/main.js + كل الموديولات الحقيقية + DOM مبني من index.html الحقيقي): الضغط يتم بتنفيذ معالجات onclick/onsubmit
++// الفعلية. فقط Firebase (Auth/Firestore) محاكى بنموذج يتبع ترتيب أحداث الـ SDK (tests/boot/sdk.mjs). ليس اختبارًا على Firebase الحقيقي.
++import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict';
++import { A, S, sleep, fresh, errors, consoleErrors, loadError } from './boot/env.mjs';
++import { activeScreens, el, fire, type, nativeSubmits, screenLog } from './boot/dom.mjs';
++import fs from 'node:fs';
++
++const PW = 'Passw0rd!x'; const CUST = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
++const DRV = { role: 'driver', status: 'active', fullName: 'Drv', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } };
++const MER = { role: 'merchant', status: 'active', name: 'M' };
++const pick = (r) => { fire('home-start'); const c = [...document.querySelectorAll('.rp-card')].find((x) => x.attrs.onclick.includes(`'${r}'`)); fire.call(null, c.id || '__none__'); };
++// البطاقات بلا id: ننفذ onclick الخاص بها كما يفعل المتصفح
++const choose = (r) => { fire('home-start'); const c = [...document.querySelectorAll('.rp-card')].find((x) => x.attrs.onclick.includes(`'${r}'`)); new Function(c.attrs.onclick)(); };
++const acct = (email, uid, doc) => { S.accounts[email] = { uid, password: PW }; if (doc) { S.users[uid] = doc; if (doc.role === 'merchant') S.stores[uid] = {}; } };
++const emailLogin = async (email, pw = PW, wait = 60) => { type('em-email', email); type('em-pass', pw); fire('em-form', 'submit'); await sleep(wait); };
++const google = async (user, wait = 80) => { S.popupUser = user; fire('lg-google'); await sleep(wait); };
++const screen = () => activeScreens().join(',');
++beforeEach(async () => { await fresh(); });
++
++test('00. الإقلاع: لا خطأ تحميل، الصفحة الرئيسية ظاهرة، شاشة التحميل مخفية، مستمع Auth واحد فقط', async () => {
++  assert.equal(loadError, null); assert.equal(screen(), 'screen-entry'); assert.equal(el('loading').classes.has('hide'), true); assert.equal(S.listeners.length, 1); assert.deepEqual(errors, []);
++});
++test('00b. كل معالجات onclick/onsubmit في index.html تشير لدوال معرّفة على window (لا أزرار ميتة)', () => {
++  const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8'); const SKIP = new Set(['event', 'if', 'return', 'location', 'preventDefault', 'stopPropagation']); const bad = new Set();
++  for (const m of html.matchAll(/\son([a-z]+)="([^"]*)"/g)) for (const c of m[2].matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) if (!SKIP.has(c[1]) && typeof globalThis[c[1]] !== 'function') bad.add(c[1]);
++  assert.deepEqual([...bad], []);
++});
++
++// ---- 1,2: Google ----
++test('01. Google ناجح (عميل): لوحة العميل بعد قراءة users/{uid} مرة واحدة، ولا رجوع للبداية', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await google({ uid: 'u1', email: 'a@x.com' });
++  assert.equal(screen(), 'screen-customer'); assert.equal(S.calls.filter((c) => c === 'getDoc users').length, 1);
++  const i = screenLog.lastIndexOf('screen-login'); assert.ok(i >= 0); assert.equal(screenLog.slice(i + 1).includes('screen-entry'), false, screenLog.join('>')); assert.equal(screenLog.filter((s) => s === 'screen-customer').length, 1);
++});
++test('02. Google فاشل: رسالة عربية ظاهرة داخل شاشة الدخول، الزر يعود، لا انتقال', async () => {
++  choose('customer');
++  const cases = { 'auth/popup-closed-by-user': /إغلاق نافذة Google/, 'auth/unauthorized-domain': /من هذا الرابط/, 'auth/operation-not-allowed': /غير متاح/, 'auth/internal-error': /غير متوقع/, 'auth/network-request-failed': /الإنترنت/ };
++  for (const [code, re] of Object.entries(cases)) { S.popupError = code; fire('lg-google'); await sleep(40); assert.match(el('err-msg').textContent, re, code); assert.equal(el('lg-google').disabled, false); assert.equal(screen(), 'screen-login'); }
++  S.popupError = 'auth/popup-blocked'; fire('lg-google'); await sleep(40); assert.equal(el('lg-alt').hidden, false); // مسار redirect البديل يُعرض صراحة
++});
++test('02b. وضع التشخيص: رمز Firebase يظهر في الرسالة فقط عند DEBUG_ERRORS', async () => {
++  choose('customer'); S.popupError = 'auth/internal-error'; fire('lg-google'); await sleep(40); assert.ok(!el('err-msg').textContent.includes('auth/internal-error'));
++  window.DEBUG_ERRORS = true; fire('lg-google'); await sleep(40); assert.ok(el('err-msg').textContent.includes('[auth/internal-error]'));
++});
++
++// ---- 3,4: بريد ----
++test('03. بريد وكلمة مرور صحيحان => لوحة العميل بلا رجوع للبداية ولا تكرار توجيه', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com');
++  assert.equal(screen(), 'screen-customer'); assert.equal(nativeSubmits.length, 0); assert.equal(S.calls.filter((c) => c === 'getDoc users').length, 1);
++  assert.equal(screenLog.slice(screenLog.lastIndexOf('screen-login') + 1).includes('screen-entry'), false); assert.equal(screenLog.filter((s) => s === 'screen-customer').length, 1);
++});
++test('04. كلمة مرور خاطئة: رسالة موحدة، تبقى شاشة الدخول، لا لوحة، الحقول والأزرار سليمة', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com', 'wrong-pw!');
++  assert.match(el('err-msg').textContent, /غير صحيحة/); assert.equal(screen(), 'screen-login'); assert.equal(el('em-pass').value, ''); assert.equal(el('em-submit').disabled, false); assert.equal(S.calls.includes('getDoc users'), false);
++});
++
++// ---- 5,6: إنشاء حساب ----
++test('05. إنشاء حساب جديد (عميل/كابتن/تاجر): مستند واحد بالحالة الصحيحة ثم شاشة الاستكمال، بلا صلاحيات إدارية', async () => {
++  for (const [role, st, scr] of [['customer', 'active', 'screen-complete-customer'], ['driver', 'incomplete', 'screen-driver-register'], ['merchant', 'incomplete', 'screen-complete-merchant']]) {
++    await fresh(); const em = role + '@x.com'; choose(role); fire('em-signup'); type('su-email', em); type('su-pass', PW); type('su-pass2', PW); fire('su-form', 'submit'); await sleep(80);
++    const w = S.writes.filter((x) => x.path === 'users/uid-' + em); assert.equal(w.length, 1, role); assert.equal(w[0].data.role, role); assert.equal(w[0].data.status, st); assert.equal('isAdmin' in w[0].data || 'approvedBy' in w[0].data, false); assert.equal(screen(), scr, role);
++  }
++});
++test('06. تسجيل بمدخلات غير صالحة/بريد مستخدم: رسائل واضحة داخل شاشة التسجيل بدون طلب شبكة (عدا المستخدم)', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); fire('em-signup'); const go = async (e, p, c) => { type('su-email', e); type('su-pass', p); type('su-pass2', c); fire('su-form', 'submit'); await sleep(40); return el('su-err').textContent; };
++  assert.match(await go('bad', PW, PW), /صيغة البريد/); assert.match(await go('n@x.com', 'short', 'short'), /8 أحرف/); assert.match(await go('n@x.com', PW, PW + '1'), /غير متطابقتين/); assert.equal(S.calls.filter((c) => c === 'create').length, 0);
++  assert.match(await go('a@x.com', PW, PW), /مسجّل بالفعل/); assert.equal(S.writes.length, 0); assert.equal(screen(), 'screen-signup'); assert.equal(el('su-submit').disabled, false);
++});
++test('06b. نجاح إنشاء حساب Firebase وفشل حفظ الملف: لا يُبتلع الخطأ، رسالة + إعادة محاولة، والإعادة تنجح بدون مستند مكرر', async () => {
++  choose('driver'); fire('em-signup'); type('su-email', 'n@x.com'); type('su-pass', PW); type('su-pass2', PW); S.failWrite = true; fire('su-form', 'submit'); await sleep(80);
++  assert.equal(screen(), 'screen-login'); assert.match(el('lg-retry').hidden ? '' : el('err-msg').textContent, /تعذّر حفظ بياناته/); assert.ok(consoleErrors.some((x) => x.includes('permission-denied'))); assert.equal(S.users['uid-n@x.com'], undefined);
++  S.failWrite = false; fire('lg-retry'); await sleep(80);
++  assert.equal(screen(), 'screen-driver-register'); assert.equal(S.writes.filter((x) => x.path === 'users/uid-n@x.com').length, 1); assert.equal(S.users['uid-n@x.com'].role, 'driver'); assert.equal(S.users['uid-n@x.com'].status, 'incomplete');
++});
++
++// ---- 7,8: استعادة ----
++test('07. استعادة كلمة المرور: رد محايد (مسجّل وغير مسجّل) ويبقى المستخدم في شاشة الاستعادة', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); fire('em-forgot'); assert.equal(screen(), 'screen-forgot');
++  for (const e of ['a@x.com', 'nobody@x.com']) { type('fg-email', e); fire('fg-form', 'submit'); await sleep(40); assert.match(el('fg-ok').textContent, /إذا كان هذا البريد مسجّلًا/); assert.equal(el('fg-err').textContent, ''); assert.equal(screen(), 'screen-forgot'); }
++  assert.equal(nativeSubmits.length, 0);
++});
++test('08. فشل الاستعادة: بريد غير صالح/محاولات كثيرة/انقطاع => رسالة مناسبة، بلا نجاح زائف', async () => {
++  choose('customer'); fire('em-forgot'); type('fg-email', 'bad'); fire('fg-form', 'submit'); await sleep(20); assert.match(el('fg-err').textContent, /صيغة البريد/); assert.equal(S.calls.includes('reset'), false);
++  type('fg-email', 'a@x.com'); S.resetError = 'auth/too-many-requests'; fire('fg-form', 'submit'); await sleep(40); assert.match(el('fg-err').textContent, /محاولات كثيرة/); assert.equal(el('fg-ok').textContent, '');
++  S.resetError = 'auth/network-request-failed'; fire('fg-form', 'submit'); await sleep(40); assert.match(el('fg-err').textContent, /الإنترنت/);
++});
++
++// ---- 9: لا إعادة تحميل غير مقصودة ----
++test('09. إرسال النماذج لا يسبب إعادة تحميل حتى لو المعالج غير معرّف (كلمة المرور لا تظهر في الرابط)', async () => {
++  choose('customer'); type('em-email', 'a@x.com'); type('em-pass', PW);
++  for (const [form, fn] of [['em-form', 'emailLogin'], ['su-form', 'emailSignup'], ['fg-form', 'emailReset']]) { const keep = globalThis[fn]; delete globalThis[fn]; fire(form, 'submit'); globalThis[fn] = keep; }
++  assert.deepEqual(nativeSubmits, []);
++  const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8'); assert.match(html, /addEventListener\('submit'[\s\S]{0,160}classList\.contains\('em-form'\)[\s\S]{0,60}preventDefault\(\)/); // حارس يعمل حتى لو فشلت الوحدات
++});
++
++// ---- 10,11: لا رجوع للبداية / لا تكرار توجيه ----
++test('10. مستمع "مفيش مستخدم" المتأخر بعد رفض الدور لا يرجّع المستخدم للرئيسية ولا يمسح الرسالة', async () => {
++  acct('a@x.com', 'u1', CUST); S.listenerDelay = 40; choose('driver'); await emailLogin('a@x.com', PW, 250);
++  assert.equal(screen(), 'screen-login'); assert.match(el('err-msg').textContent, /كحساب عميل/); assert.equal(S.signOuts, 1);
++});
++test('10b. حدث خروج غير متوقع أثناء الدخول لا يمسح الدور المختار: حساب عميل يختار "كابتن" يُرفض ولا يدخل لوحة العميل بصمت', async () => {
++  acct('a@x.com', 'u1', CUST); choose('driver'); S.netDelay = 40; type('em-email', 'a@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(5);
++  S.listeners.forEach((l) => l(null)); // null عشوائي أثناء العملية (خروج من تاب تاني مثلًا)
++  await sleep(250);
++  assert.equal(screenLog.includes('screen-customer'), false, screenLog.join('>')); assert.equal(screenLog.slice(screenLog.lastIndexOf('screen-login') + 1).includes('screen-entry'), false);
++  assert.match(el('err-msg').textContent, /كحساب عميل.*ككابتن/); assert.equal(S.signOuts, 1);
++});
++test('11. دخول واحد = قراءة users واحدة وتوجيه واحد، وكذلك استعادة جلسة', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com'); assert.equal(S.calls.filter((c) => c === 'getDoc users').length, 1);
++  assert.equal(screenLog.filter((s) => s === 'screen-customer').length, 1);
++});
++
++// ---- 12,13: أدوار وحالات ----
++test('12. اختلاط الأدوار عبر Google والبريد: كل التقاطعات مرفوضة بلا لوحة، وبالرسالة المناسبة لكل طريقة', async () => {
++  const DOC = { customer: CUST, driver: DRV, merchant: MER }; const DASH = ['screen-customer', 'screen-driver', 'screen-merchant', 'screen-admin']; let n = 0;
++  for (const role of Object.keys(DOC)) for (const intent of Object.keys(DOC)) {
++    if (role === intent) continue;
++    for (const via of ['google', 'email']) {
++      await fresh(); acct('a@x.com', 'u1', DOC[role]); choose(intent);
++      if (via === 'google') await google({ uid: 'u1', email: 'a@x.com' }); else await emailLogin('a@x.com');
++      assert.equal(DASH.includes(screenLog.at(-1)) || screenLog.some((s) => DASH.includes(s)), false, `${role}->${intent} via ${via}: ${screenLog}`); assert.equal(S.signOuts, 1); assert.equal(S.writes.length, 0);
++      assert.match(el('err-msg').textContent, new RegExp(via === 'google' ? 'ببريد Google آخر' : 'ببريد إلكتروني آخر')); n++;
++    }
++  }
++  assert.equal(n, 12);
++});
++test('13. الحالات: incomplete/pending/rejected/blocked/active تُوجَّه فعليًا ولا تُعامل كـ active', async () => {
++  const T = [[{ ...DRV, status: 'incomplete' }, 'driver', 'screen-driver-register'], [{ ...DRV, status: 'pending' }, 'driver', 'screen-driver-register'], [{ ...DRV, status: 'rejected' }, 'driver', 'screen-driver-register'], [DRV, 'driver', 'screen-driver'],
++    [{ ...MER, status: 'incomplete' }, 'merchant', 'screen-complete-merchant'], [{ ...MER, status: 'pending' }, 'merchant', 'screen-merchant-status'], [{ ...MER, status: 'rejected' }, 'merchant', 'screen-merchant-status'], [MER, 'merchant', 'screen-merchant'],
++    [{ ...CUST, status: 'blocked' }, 'customer', 'screen-blocked'], [{ ...CUST, phone: '' }, 'customer', 'screen-complete-customer'], [CUST, 'customer', 'screen-customer']];
++  for (const [doc, role, scr] of T) { await fresh(); acct('a@x.com', 'u1', doc); choose(role); await emailLogin('a@x.com', PW, 90); assert.equal(screen(), scr, `${doc.role}/${doc.status}`); }
++});
++test('13b. دور مفقود أو غير معروف في Firestore => رفض بلا أي لوحة (لا افتراض عميل)', async () => {
++  for (const bad of [{ status: 'active', name: 'x', phone: '01012345678' }, { role: 'weird', status: 'active' }]) { await fresh(); acct('a@x.com', 'u1', bad); choose('customer'); await emailLogin('a@x.com'); assert.notEqual(screen(), 'screen-customer'); assert.equal(S.signOuts, 1); assert.match(el('home-err').textContent + el('err-msg').textContent, /غير مكتملة أو غير صالحة/); }
++});
++
++// ---- 14: خروج ----
++test('14. الخروج: جلسة منتهية، الرئيسية، لا اختيار عالق، ثم تسجيل دخول جديد يبدأ من اختيار النوع', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com'); assert.equal(screen(), 'screen-customer');
++  await window.doLogout(); await sleep(30); assert.equal(screen(), 'screen-entry'); assert.equal(S.current, null); assert.equal(window.CU, null); assert.equal(window.selectedType, null); assert.equal(el('em-email').value, ''); assert.equal(el('em-pass').value, '');
++  fire('home-start'); assert.equal(screen(), 'screen-role-pick'); // يبدأ من جديد باختيار النوع
++});
++
++// ---- مهلة العمليات المعلّقة + إعادة المحاولة بعد فشل القراءة ----
++test('15. نافذة Google معلّقة: بعد المهلة تُفك الأزرار وتظهر رسالة (بدل تجمّد كل الأزرار)، ويمكن الدخول بالبريد بعدها', async () => {
++  window.AUTH_OP_TIMEOUT_MS = 120; acct('a@x.com', 'u1', CUST); choose('customer'); S.popupHang = true; fire('lg-google'); await sleep(40);
++  assert.equal(el('lg-google').disabled && el('em-submit').disabled, true); await sleep(200);
++  assert.equal(el('lg-google').disabled || el('em-submit').disabled, false); assert.match(el('err-msg').textContent, /أطول من المعتاد/);
++  await emailLogin('a@x.com'); assert.equal(screen(), 'screen-customer');
++});
++test('16. فشل قراءة users بعد نجاح المصادقة: رسالة + إعادة محاولة بنفس الدور، بلا لوحة', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); S.failRead = true; await emailLogin('a@x.com'); assert.notEqual(screen(), 'screen-customer'); assert.match(el('err-msg').textContent, /إعادة المحاولة/); assert.equal(el('lg-retry').hidden, false);
++  S.failRead = false; fire('lg-retry'); await sleep(60); assert.equal(screen(), 'screen-customer');
++});
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/auth-reopen.test.mjs proj/tests/auth-reopen.test.mjs
+--- orig/tests/auth-reopen.test.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/auth-reopen.test.mjs	2026-10-10 12:54:08.874694057 +0000
+@@ -0,0 +1,18 @@
++// node --test tests/auth-reopen.test.mjs — فتح التطبيق من جديد بحالة مسبقة (كل سيناريو في عملية Node مستقلة تُقلع التطبيق الحقيقي).
++import { test } from 'node:test'; import assert from 'node:assert/strict'; import { execFileSync } from 'node:child_process';
++const run = (pre) => { const out = execFileSync(process.execPath, [new URL('./boot/reopen.mjs', import.meta.url).pathname], { env: { ...process.env, BOOT_PRESEED: JSON.stringify(pre) }, encoding: 'utf8' }); return JSON.parse(out.split('\n').find((l) => l.startsWith('RESULT ')).slice(7)); };
++const CUST = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
++const recent = JSON.stringify({ t: 'driver', ts: Date.now() });
++test('R1. جلسة صحيحة مستعادة => اللوحة المناسبة مباشرة بدون إعادة اختيار', () => {
++  const r = run({ session: { uid: 'u1', email: 'a@x.com' }, users: { u1: CUST } }); assert.equal(r.loadError, false); assert.deepEqual(r.screens, ['screen-customer']); assert.equal(r.signOuts, 0);
++});
++test('R2. اختيار دور قديم متبقٍ في sessionStorage (إعادة تحميل أثناء نافذة Google) لا يطرد جلسة مستعادة سليمة', () => {
++  const r = run({ storage: { matlabk_entry_type: recent }, session: { uid: 'u1', email: 'a@x.com' }, users: { u1: CUST } });
++  assert.deepEqual(r.screens, ['screen-customer'], JSON.stringify(r)); assert.equal(r.signOuts, 0); assert.equal(r.err, '');
++});
++test('R3. بدون جلسة: الصفحة الرئيسية، ولا أثر لاختيار قديم', () => {
++  const r = run({ storage: { matlabk_entry_type: recent } }); assert.deepEqual(r.screens, ['screen-entry']); assert.equal(r.err, '');
++});
++test('R4. جلسة مستعادة لحساب بدور غير معروف => لا لوحة (fail-closed) ورسالة', () => {
++  const r = run({ session: { uid: 'u2', email: 'b@x.com' }, users: { u2: { status: 'active', name: 'x', phone: '01012345678' } } }); assert.equal(r.screens.includes('screen-customer'), false); assert.equal(r.signOuts, 1); assert.match(r.err, /غير مكتملة أو غير صالحة/);
++});
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/boot/dom.mjs proj/tests/boot/dom.mjs
+--- orig/tests/boot/dom.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/boot/dom.mjs	2026-10-10 08:25:10.294414613 +0000
+@@ -0,0 +1,51 @@
++// DOM محاكاة مبنية من index.html الحقيقي: كل id/class/onclick/onsubmit مأخوذ من الملف نفسه (مش مكتوب يدويًا).
++// الهدف: تشغيل معالجات onclick/onsubmit الفعلية، وكشف أي getElementById يرجع null، ورصد "إرسال نموذج أصلي" (إعادة تحميل الصفحة).
++import fs from 'node:fs';
++const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
++export const registry = new Map(); const all = [];
++export const screenLog = []; // ترتيب تفعيل الشاشات (لكشف الرجوع للبداية بعد نجاح الدخول)
++export const nativeSubmits = []; // كل إرسال نموذج أصلي (يعني إعادة تحميل الصفحة) يُسجَّل هنا مع الرابط الناتج
++class El {
++  constructor(tag, attrs = {}) { this.tagName = tag.toUpperCase(); this.attrs = { ...attrs }; this.id = attrs.id || ''; this.classes = new Set((attrs.class || '').split(/\s+/).filter(Boolean));
++    this.style = {}; this.value = attrs.value || ''; this._text = ''; this.hidden = 'hidden' in attrs; this.disabled = 'disabled' in attrs; this.children = []; this.form = null; this.listeners = {}; this.dataset = {};
++    const self = this; this.classList = { add: (...c) => c.forEach((x) => { self.classes.add(x); if (x === 'active' && self.classes.has('screen')) screenLog.push(self.id); }), remove: (...c) => c.forEach((x) => self.classes.delete(x)), contains: (c) => self.classes.has(c), toggle: (c, on) => { const v = on === undefined ? !self.classes.has(c) : !!on; v ? self.classes.add(c) : self.classes.delete(c); return v; } }; }
++  get textContent() { return this._text; } set textContent(v) { this._text = String(v); }
++  set innerHTML(v) { this._html = String(v); this._text = String(v).replace(/<[^>]*>/g, ''); } get innerHTML() { return this._html ?? this._text; }
++  get className() { return [...this.classes].join(' '); } set className(v) { this.classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
++  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; } setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'disabled') this.disabled = true; } removeAttribute(k) { delete this.attrs[k]; }
++  addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } removeEventListener() {} dispatchEvent() { return true; }
++  scrollIntoView() {} focus() {} blur() {} click() {} remove() {} appendChild(c) { this.children.push(c); return c; } append() {} prepend() {} insertAdjacentHTML() {}
++  querySelector() { return null; } querySelectorAll() { return []; } closest() { return null; } contains() { return false; }
++  get parentElement() { return null; } get parentNode() { return null; } get offsetHeight() { return 0; } get offsetWidth() { return 0; } getBoundingClientRect() { return { top: 0, left: 0, width: 0, height: 0, bottom: 0, right: 0 }; }
++}
++const VOID = new Set(['input', 'br', 'img', 'meta', 'link', 'hr', 'source']);
++(function parse() {
++  const body = html.slice(html.indexOf('<body')); let form = null;
++  for (const m of body.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:\s+[^<>=\s]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*\/?>/g)) {
++    const [, close, tag, rest] = m; const t = tag.toLowerCase();
++    if (close) { if (t === 'form') form = null; continue; }
++    if (t === 'script' || t === 'style') continue;
++    const attrs = {}; for (const a of rest.matchAll(/([^\s=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) attrs[a[1].toLowerCase()] = a[2] ?? a[3] ?? a[4] ?? '';
++    const e = new El(t, attrs); if (t === 'form') form = e; else if (form) e.form = form; all.push(e); if (e.id) registry.set(e.id, e);
++  }
++})();
++const matches = (e, sel) => { if (sel.startsWith('.')) return e.classes.has(sel.slice(1)); const a = /^\[([a-z-]+)\]$/.exec(sel); if (a) return a[1] in e.attrs; const t = /^([a-z]+)\[([a-z-]+)(?:="([^"]*)")?\]$/.exec(sel); if (t) return e.tagName === t[1].toUpperCase() && t[2] in e.attrs && (t[3] === undefined || e.attrs[t[2]] === t[3]); return e.tagName === sel.toUpperCase(); };
++const doc = { getElementById: (id) => registry.get(id) || null, querySelectorAll: (s) => all.filter((e) => String(s).split(',').some((x) => matches(e, x.trim()))), querySelector: (s) => all.find((e) => String(s).split(',').some((x) => matches(e, x.trim()))) || null,
++  createElement: (t) => new El(t), createTextNode: (t) => ({ textContent: t }), addEventListener() {}, removeEventListener() {}, body: new El('body'), documentElement: new El('html'), head: new El('head'), title: '', visibilityState: 'visible', hidden: false, cookie: '' };
++globalThis.document = doc;
++export const resetDom = () => { for (const e of all) { e.value = e.attrs.value || ''; e.disabled = 'disabled' in e.attrs; if (e.classes.has('lg-err') || e.classes.has('em-ok')) { e._text = ''; e.style.display = 'none'; } if (e.id.endsWith('-retry') || e.id === 'lg-alt') e.hidden = true; } screenLog.length = 0; nativeSubmits.length = 0; };
++export const el = (id) => registry.get(id);
++export const activeScreens = () => all.filter((e) => e.classes.has('screen') && e.classes.has('active')).map((e) => e.id);
++// تشغيل معالج inline كما يفعل المتصفح: this=العنصر، event=كائن حدث، والمتغيرات من window العالمي. onsubmit يرجع false => preventDefault.
++export function fire(id, type = 'click') {
++  const e = registry.get(id); if (!e) throw new Error('no element #' + id);
++  if (e.disabled) return { blocked: true };
++  const code = e.attrs['on' + type]; const ev = { type, target: e, currentTarget: e, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
++  let ret, err = null; if (code) { try { ret = new Function('event', code).call(e, ev); } catch (x) { err = x; } }
++  if (type === 'submit' && e.tagName === 'FORM') {
++    const prevented = ev.defaultPrevented || ret === false;
++    if (!prevented) { const q = all.filter((x) => x.form === e && x.attrs.name).map((x) => encodeURIComponent(x.attrs.name) + '=' + encodeURIComponent(x.value)).join('&'); nativeSubmits.push({ form: id, url: '?' + q, handlerError: err && String(err.message || err) }); }
++  }
++  return { ev, err };
++}
++export const type = (id, v) => { registry.get(id).value = v; };
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/boot/env.mjs proj/tests/boot/env.mjs
+--- orig/tests/boot/env.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/boot/env.mjs	2026-10-10 12:54:08.868746345 +0000
+@@ -0,0 +1,27 @@
++import { register } from 'node:module';
++register('./loader.mjs', import.meta.url);
++import './dom.mjs';
++import { S, resetSdk, startAuth, sleep } from './sdk.mjs';
++const mem = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => m.delete(k), clear: () => m.clear(), get length() { return m.size; }, key: (i) => [...m.keys()][i] ?? null, _m: m }; };
++globalThis.window = globalThis; globalThis.sessionStorage = mem(); globalThis.localStorage = mem();
++globalThis.addEventListener = () => {}; globalThis.removeEventListener = () => {}; globalThis.scrollTo = () => {}; globalThis.requestAnimationFrame = (f) => setTimeout(f, 0);
++globalThis.matchMedia = () => ({ matches: false, addEventListener() {}, addListener() {} });
++globalThis.location = { href: 'https://matlabk.github.io/matlabk-app/', origin: 'https://matlabk.github.io', pathname: '/matlabk-app/', search: '', hash: '', reload() {}, replace() {}, assign() {} };
++globalThis.history = { pushState() {}, replaceState() {}, back() {} };
++Object.defineProperty(globalThis, 'navigator', { value: { onLine: true, userAgent: 'node-test', permissions: { query: async () => ({ state: 'granted', addEventListener() {} }) }, geolocation: { getCurrentPosition() {}, watchPosition: () => 1, clearWatch() {} }, serviceWorker: undefined, clipboard: {} }, configurable: true });
++globalThis.fetch = async () => ({ ok: true, json: async () => ({}), text: async () => '' });
++globalThis.Notification = undefined; globalThis.IntersectionObserver = class { observe() {} disconnect() {} };
++export const errors = []; process.on('unhandledRejection', (e) => errors.push('unhandledRejection: ' + (e && (e.stack || e.message || e))));
++const realErr = console.error; export const consoleErrors = []; console.error = (...a) => { consoleErrors.push(a.map(String).join(' ')); };
++export { S, resetSdk, startAuth, sleep };
++const _A = await import('../../js/auth.js'); export const A = _A; // dynamic: لازم بعد register() الخاص بالـ loader
++import { resetSdkData } from './sdk.mjs'; import { resetDom as _resetDom } from './dom.mjs';
++// يرجّع التطبيق لحالة "زائر جديد على الصفحة الرئيسية" بين الاختبارات (بدون إعادة إقلاع)
++let _booted = false;
++export async function fresh() { if (!_booted) { for (let i = 0; i < 100 && !document.getElementById('loading').classes.has('hide'); i++) await sleep(30); _booted = true; await sleep(60); }
++  resetSdkData(); window.AUTH_OP_TIMEOUT_MS = undefined; window.DEBUG_ERRORS = false; _A.resetLoginState(); _A.clearEntryIntent(); _A.clearRedirectPending(); sessionStorage.clear(); localStorage.clear(); _resetDom(); consoleErrors.length = 0; errors.length = 0; window.CU = null; window.CUD = null; window.selectedType = null; window.showScreen('screen-entry'); _resetDom(); }
++export let loadError = null;
++// حالة مسبقة قبل الإقلاع (لاختبارات إعادة فتح التطبيق): BOOT_PRESEED = JSON {storage:{k:v}, session:{uid,email}, users:{uid:doc}}
++if (process.env.BOOT_PRESEED) { const p = JSON.parse(process.env.BOOT_PRESEED); for (const [k, v] of Object.entries(p.storage || {})) sessionStorage.setItem(k, v); Object.assign(S.users, p.users || {}); if (p.session) S.current = p.session; }
++try { startAuth(); await import('../../js/main.js'); } catch (e) { loadError = e; }
++export const screens = () => import('./dom.mjs').then((d) => d.activeScreens());
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/boot/firebase-cdn-stub.mjs proj/tests/boot/firebase-cdn-stub.mjs
+--- orig/tests/boot/firebase-cdn-stub.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/boot/firebase-cdn-stub.mjs	2026-10-10 08:17:11.153090755 +0000
+@@ -0,0 +1 @@
++export {};
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/boot/loader.mjs proj/tests/boot/loader.mjs
+--- orig/tests/boot/loader.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/boot/loader.mjs	2026-10-10 08:17:11.151636747 +0000
+@@ -0,0 +1,17 @@
++// loader للإقلاع الكامل: كل موديولات js/ حقيقية. فقط روابط Firebase على gstatic تُستبدل بمحاكاة (لا شبكة في الاختبار).
++const STUB = new URL('./firebase-cdn-stub.mjs', import.meta.url).href;
++export async function resolve(spec, ctx, next) {
++  if (/^https:\/\/www\.gstatic\.com\/firebasejs\//.test(spec)) return { url: STUB + '?m=' + encodeURIComponent(spec.split('/').pop()), shortCircuit: true };
++  return next(spec, ctx);
++}
++export async function load(url, ctx, next) {
++  if (url.startsWith(STUB)) {
++    const mod = decodeURIComponent(url.split('?m=')[1]);
++    const names = { 'firebase-app.js': ['initializeApp'],
++      'firebase-firestore.js': ['getFirestore','collection','doc','addDoc','getDoc','getDocs','setDoc','updateDoc','onSnapshot','query','where','orderBy','serverTimestamp','limit','startAfter','deleteDoc','runTransaction','writeBatch','getCountFromServer','increment','arrayUnion','Timestamp','GeoPoint','documentId','endBefore','limitToLast','getAggregateFromServer','sum','count','average','deleteField','arrayRemove','initializeFirestore','persistentLocalCache','enableIndexedDbPersistence','connectFirestoreEmulator','collectionGroup','getDocFromServer','getDocsFromServer','or','and','startAt','endAt','FieldValue','FieldPath','Bytes'],
++      'firebase-auth.js': ['getAuth','signOut','onAuthStateChanged','GoogleAuthProvider','signInWithPopup','signInWithRedirect','getRedirectResult','signInWithEmailAndPassword','createUserWithEmailAndPassword','sendPasswordResetEmail'] }[mod] || [];
++    const src = names.map((n) => `export const ${n} = (...a) => globalThis.__sdk[${JSON.stringify(n)}](...a);`).join('\n').replace(/export const GoogleAuthProvider = .*/, 'export class GoogleAuthProvider { setCustomParameters(){} }');
++    return { format: 'module', source: src, shortCircuit: true };
++  }
++  return next(url, ctx);
++}
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/boot/reopen.mjs proj/tests/boot/reopen.mjs
+--- orig/tests/boot/reopen.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/boot/reopen.mjs	2026-10-10 12:54:08.873523126 +0000
+@@ -0,0 +1,5 @@
++// يُشغَّل كعملية مستقلة: يحاكي "فتح التطبيق من جديد" بحالة مسبقة (BOOT_PRESEED) ثم يطبع النتيجة JSON.
++import { S, sleep, loadError } from './env.mjs'; import { activeScreens, el, screenLog } from './dom.mjs';
++await sleep(500);
++console.log('RESULT ' + JSON.stringify({ loadError: !!loadError, screens: activeScreens(), log: screenLog, signOuts: S.signOuts, err: el('err-msg').textContent + el('home-err').textContent }));
++process.exit(0);
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/boot/sdk.mjs proj/tests/boot/sdk.mjs
+--- orig/tests/boot/sdk.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/boot/sdk.mjs	2026-10-10 08:25:10.294785600 +0000
+@@ -0,0 +1,36 @@
++// محاكاة Firebase Auth + Firestore تتبع ترتيب الأحداث الحقيقي: المستمعون يُستدعون بشكل غير متزامن (microtask) بعد تغيّر المستخدم،
++// وقبل أن يُحلّ وعد signOut/signIn (كما في SDK). تأخير الشبكة قابل للضبط. لا تقول شيئًا عن سلوك خوادم Firebase الفعلية.
++export const S = { users: {}, stores: {}, accounts: {}, current: null, listeners: [], initialized: false, lastUid: undefined, initDelay: 5, redirectDelay: 5, netDelay: 2, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), resetError: null, signOuts: 0, listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied' };
++const dispatch = (l, u) => (S.listenerDelay ? setTimeout(() => l(u), S.listenerDelay) : Promise.resolve().then(() => l(u)));
++const wait = (ms) => new Promise((r) => setTimeout(r, ms));
++const err = (code) => Object.assign(new Error(code), { code });
++function notify() { if (!S.initialized) return; const uid = S.current?.uid ?? null; if (S.lastUid === uid) return; S.lastUid = uid; const u = S.current; for (const l of S.listeners) dispatch(l, u); }
++export function resetSdk() { Object.assign(S, { listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', users: {}, stores: {}, accounts: {}, current: null, listeners: [], initialized: false, lastUid: undefined, initDelay: 5, redirectDelay: 5, netDelay: 2, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), resetError: null, signOuts: 0 }); }
++const auth = { get currentUser() { return S.current; } };
++const snap = (d) => ({ exists: () => d !== undefined, data: () => d, id: 'x' });
++const tbl = (r) => (r.col === 'users' ? S.users : r.col === 'stores' ? S.stores : (S.other ||= {})[r.col] ||= {});
++const qsnap = () => ({ docs: [], empty: true, size: 0, forEach() {}, docChanges: () => [] });
++globalThis.__sdk = {
++  initializeApp: () => ({}), getFirestore: () => ({}), getAuth: () => auth,
++  collection: (_d, c) => ({ col: c, isCol: true }), doc: (_d, c, id) => ({ col: c, id }),
++  getDoc: async (r) => { S.calls.push('getDoc ' + r.col); await wait(S.netDelay); if (S.failRead) throw err('unavailable'); return snap(tbl(r)[r.id]); },
++  setDoc: async (r, d) => { if (S.failWrite) throw err(S.writeError); S.writes.push({ path: r.col + '/' + r.id, data: d }); tbl(r)[r.id] = d; },
++  updateDoc: async (r, d) => { S.writes.push({ path: r.col + '/' + r.id, data: d, update: true }); },
++  addDoc: async () => ({ id: 'new' }), deleteDoc: async () => {}, getDocs: async () => qsnap(), onSnapshot: () => () => {},
++  query: (...a) => ({ q: a }), where: () => ({}), orderBy: () => ({}), limit: () => ({}), startAfter: () => ({}), serverTimestamp: () => 'TS', arrayUnion: (...a) => a,
++  getCountFromServer: async () => ({ data: () => ({ count: 0 }) }), getAggregateFromServer: async () => ({ data: () => ({}) }), average: () => ({}), count: () => ({}), sum: () => ({}), writeBatch: () => ({ set() {}, update() {}, delete() {}, commit: async () => {} }),
++  runTransaction: async (_d, fn) => { await wait(S.netDelay); if (S.failWrite) throw err(S.writeError); return fn({ get: async (r) => snap(tbl(r)[r.id]), set: (r, d) => { S.writes.push({ path: r.col + '/' + r.id, data: d }); tbl(r)[r.id] = d; }, update: () => {} }); },
++  onAuthStateChanged: (_a, cb) => { S.listeners.push(cb); if (S.initialized) Promise.resolve().then(() => cb(S.current)); return () => {}; },
++  getRedirectResult: async () => { await wait(S.redirectDelay); return null; },
++  signOut: async () => { S.signOuts++; S.current = null; notify(); await Promise.resolve(); },
++  signInWithPopup: async () => { S.calls.push('popup'); if (S.popupHang) return new Promise(() => {}); await wait(S.netDelay); if (S.popupError) throw err(S.popupError); if (!S.popupUser) throw err('auth/popup-closed-by-user'); S.current = S.popupUser; notify(); await Promise.resolve(); return { user: S.current }; },
++  signInWithRedirect: async () => { S.calls.push('redirect'); },
++  signInWithEmailAndPassword: async (_a, email, pw) => { S.calls.push('signIn'); await wait(S.netDelay); if (S.disabledProviders.has('password')) throw err('auth/operation-not-allowed'); const a = S.accounts[email]; if (!a || a.password !== pw) throw err('auth/invalid-credential'); S.current = { uid: a.uid, email }; notify(); await Promise.resolve(); return { user: S.current }; },
++  createUserWithEmailAndPassword: async (_a, email, pw) => { S.calls.push('create'); await wait(S.netDelay); if (S.disabledProviders.has('password')) throw err('auth/operation-not-allowed'); if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw err('auth/invalid-email'); if (pw.length < 6) throw err('auth/weak-password'); if (S.accounts[email]) throw err('auth/email-already-in-use'); const a = { uid: 'uid-' + email, password: pw }; S.accounts[email] = a; S.current = { uid: a.uid, email }; notify(); await Promise.resolve(); return { user: S.current }; },
++  sendPasswordResetEmail: async (_a, email) => { S.calls.push('reset'); await wait(S.netDelay); if (S.resetError) throw err(S.resetError); if (!S.accounts[email]) throw err('auth/user-not-found'); },
++};
++export function startAuth() { setTimeout(() => { S.initialized = true; S.lastUid = undefined; const u = S.current; S.lastUid = u?.uid ?? null; for (const l of S.listeners) Promise.resolve().then(() => l(u)); }, S.initDelay); }
++export const sleep = wait;
++
++// تصفير بيانات/إعدادات المحاكاة بين الاختبارات مع إبقاء مستمع التطبيق المسجّل (التطبيق يقلع مرة واحدة لكل ملف اختبار)
++export function resetSdkData() { Object.assign(S, { users: {}, stores: {}, accounts: {}, current: null, lastUid: null, netDelay: 1, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), resetError: null, signOuts: 0, listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied' }); }
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/email-auth.test.mjs proj/tests/email-auth.test.mjs
+--- orig/tests/email-auth.test.mjs	2026-10-10 02:14:01.000000000 +0000
++++ proj/tests/email-auth.test.mjs	2026-10-10 12:57:13.280617719 +0000
+@@ -174,3 +174,9 @@
+   assert.match(describeAuthError({ code: 'auth/operation-not-allowed' }, { method: 'email' }).message, /بالبريد الإلكتروني غير متاح/);
+   assert.match(describeAuthError({ code: 'auth/operation-not-allowed' }).message, /Google/); // مسار Google بلا تغيير
+ });
++
++test('E26. أخطاء إعدادات المشروع (قيود مفتاح API على النطاق وغيرها) تُعرض كرسالة إعدادات واضحة لكل الطرق، لا كـ"خطأ غير متوقع"', async () => {
++  const { CONFIG_ERROR } = await import('../js/auth-flow.js');
++  for (const code of ['auth/requests-from-referer-https://matlabk.github.io-are-blocked.', 'auth/invalid-api-key', 'auth/app-not-authorized', 'auth/configuration-not-found']) for (const method of ['google', 'email']) assert.equal(describeAuthError({ code }, { method }).message, CONFIG_ERROR, code + ' ' + method);
++  assert.notEqual(describeAuthError({ code: 'auth/internal-error' }).message, CONFIG_ERROR);
++});
+diff -ruN -x node_modules -x 'MATLABK-AUTH-*' orig/tests/package.json proj/tests/package.json
+--- orig/tests/package.json	2026-10-10 02:14:01.000000000 +0000
++++ proj/tests/package.json	2026-10-10 12:54:21.634501543 +0000
+@@ -5,7 +5,7 @@
+   "scripts": {
+     "test": "firebase emulators:exec --config ../firebase.json --project go-elmanayef --only firestore \"node --test firestore.rules.test.mjs\"",
+     "contract": "node --test schema-contract.test.mjs",
+-    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs email-auth.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs"
++    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs email-auth.test.mjs auth-e2e.test.mjs auth-reopen.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs"
+   },
+   "devDependencies": {
+     "@firebase/rules-unit-testing": "^3.0.0",

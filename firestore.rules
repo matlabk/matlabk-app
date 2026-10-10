@@ -62,7 +62,11 @@ service cloud.firestore {
              validPhone(d.get('phone', '')) &&
              d.get('nationalId', '') is string && d.get('nationalId', '').size() == 14 &&
              d.get('vehicleType', '') is string && d.get('vehicleType', '').size() > 0 &&
-             d.get('plateNumber', '') is string && d.get('plateNumber', '').size() > 0 &&
+             // MATLABK: رقم اللوحة ومواصفات المركبة (الموديل/اللون) اختياريان عند التسجيل - لو موجودين لازم يكونوا نصًا بحد أقصى للطول فقط.
+             // vehicleType (نوع المركبة) يفضل إلزاميًا لأنه شرط أهلية ترشيح الكابتن للمشاوير والشراء الخارجي في الـ dispatcher.
+             d.get('plateNumber', '') is string && d.get('plateNumber', '').size() <= 30 &&
+             d.get('vehicleModel', '') is string && d.get('vehicleModel', '').size() <= 50 &&
+             d.get('vehicleColor', '') is string && d.get('vehicleColor', '').size() <= 50 &&
              d.get('docsSubmitted', false) == true &&
              d.get('docs', null) is map && d.get('docs', {}).size() > 0;
     }
