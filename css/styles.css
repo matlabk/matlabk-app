@@ -988,3 +988,21 @@ textarea.inp{resize:vertical;font-family:var(--font-family)}
 .rp-ic{width:48px;height:48px;border-radius:14px;background:var(--color-primary-soft);color:var(--color-primary);display:flex;align-items:center;justify-content:center;flex:none}
 .rp-tx strong{display:block;font-size:16px;font-weight:800}
 .rp-tx small{display:block;font-size:13px;color:var(--color-text-secondary);margin-top:3px}
+
+/* ===== MATLABK: الدخول بالبريد الإلكتروني (إضافة بجانب Google) ===== */
+#screen-signup,#screen-forgot{background:#fff radial-gradient(70% 38% at 50% 0,var(--color-primary-soft),rgba(255,255,255,0));min-height:100vh;min-height:100dvh}
+#screen-signup.active,#screen-forgot.active{display:block}
+.em-div{display:flex;align-items:center;gap:12px;margin:18px 0 14px;color:var(--color-text-secondary);font-size:13px;font-weight:700}
+.em-div::before,.em-div::after{content:"";flex:1;height:1px;background:var(--color-neutral-200)}
+.em-form{display:flex;flex-direction:column;gap:6px;text-align:right}
+.em-label{font-size:13px;font-weight:800;color:var(--color-text);margin-top:6px}
+.em-input{width:100%;min-height:52px;padding:0 14px;border:1.5px solid var(--color-neutral-200);border-radius:14px;background:#fff;font-family:var(--font-family);font-size:16px;color:var(--color-text);text-align:left}
+.em-input:focus-visible{outline:3px solid rgba(255,107,0,.45);outline-offset:1px;border-color:var(--color-primary)}
+.em-input:disabled{background:#f3f4f6;color:#6b7280}
+.em-submit{position:relative;width:100%;min-height:56px;margin-top:12px;border:none;border-radius:14px;background:var(--color-primary);color:#fff;font-family:var(--font-family);font-size:16px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px}
+.em-submit:disabled{opacity:.7;cursor:not-allowed}
+.em-submit:focus-visible{outline:3px solid rgba(255,107,0,.55);outline-offset:3px}
+.em-submit .lg-spin{display:none}
+.em-submit.is-loading .lg-spin{display:inline-block;border-color:rgba(255,255,255,.45);border-top-color:#fff}
+.em-links{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:6px}
+.em-ok{margin-top:10px;padding:10px 12px;border-radius:12px;background:#ECFDF3;color:#05603A;font-size:14px;font-weight:700;line-height:1.6}
