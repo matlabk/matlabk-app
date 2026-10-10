@@ -1,7 +1,7 @@
 // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
 
 import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from './firebase.js';
-import { INTENT_ROLES, INTENT_TTL_MS, RESET_SENT, isValidEmail, normalizeEmail, validateEmailLogin, validateSignup, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
+import { INTENT_ROLES, INTENT_TTL_MS, RESET_SENT, OP_TIMEOUT_ERROR, MSG_PROFILE_CREATE_FAILED, isValidEmail, normalizeEmail, validateEmailLogin, validateSignup, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
 import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
 import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
 
@@ -18,14 +18,16 @@ export function setEntryIntent(type) {
 }
 export function peekEntryType() {
   if (_pendingIntent && Date.now() - _pendingIntent.ts <= INTENT_TTL_MS) return _pendingIntent.type;
-  try { return decodeIntent(sessionStorage.getItem(ENTRY_TYPE_KEY)); } catch(e) { return null; }
+  // sessionStorage لا يُعتمد إلا عند العودة من redirect (الصفحة اتعمّلها reload عن قصد). غير كده أي قيمة متبقية من محاولة قديمة
+  // (إعادة تحميل أثناء نافذة Google...) لا تُعامَل كدخول جديد ولا تطرد جلسة مستعادة سليمة.
+  try { return hasRedirectPending() ? decodeIntent(sessionStorage.getItem(ENTRY_TYPE_KEY)) : null; } catch(e) { return null; }
 }
 export function clearEntryIntent() { _pendingIntent = null; _loginInFlight = false; _loginMethod = 'google'; try { sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) {} }
 export function takeEntryType() { const t = peekEntryType(); clearEntryIntent(); return t; }
 // بيتنادى أول حاجة في onAuthStateChanged(user): يلتقط (الدور المختار + هل ده دخول جديد؟) ويصفّر الحالة المعلّقة.
 export function captureLoginIntent() {
   const fresh = _loginInFlight || hasRedirectPending() || peekEntryType() !== null;
-  const method = _loginMethod;
+  const method = _loginMethod; _lastMethod = method;
   return { intent: takeEntryType(), fresh, method };
 }
 import { clearAllListeners, setLoad, showScreen, showToast } from './utils.js';
@@ -50,12 +52,26 @@ export function firebaseAuthErrorMessage(e) {
 // قفل واحد بسيط يمنع تشغيل أكتر من عملية Authentication (Google/Email Login/Register/Reset)
 // في نفس اللحظة - بيتفعّل مع أول عملية وبيتحرر تلقائيًا لما تخلص (نجاح أو فشل).
 let _authOpInProgress = false;
+let _authOpTimer = null;
+// مهلة أقصى لأي عملية مصادقة معلّقة (نافذة Google عالقة، شبكة لا ترد...): بعدها تُفك الأزرار وتظهر رسالة، بدل تجمّد كل الأزرار بدون تفسير.
+// لا نمسح الدور المختار هنا: لو وصلت النتيجة المتأخرة تُعالَج بنفس بوابة الدور (لا تمرير صامت).
+const authOpTimeoutMs = () => (Number.isFinite(window.AUTH_OP_TIMEOUT_MS) ? window.AUTH_OP_TIMEOUT_MS : 45000);
 function authLockStart() {
   if (_authOpInProgress) return false;
   _authOpInProgress = true;
+  clearTimeout(_authOpTimer);
+  // عند انتهاء المهلة يبقى الدور المختار (صلاحية 10 دقائق): أي نتيجة متأخرة تمر على البوابة بدل ما تتعامل كجلسة مستعادة.
+  _authOpTimer = setTimeout(() => { if (_authOpInProgress) { console.warn('[auth] operation timed out'); _loginInFlight = false; resetLoginState(); showLoginError(OP_TIMEOUT_ERROR); } }, authOpTimeoutMs());
   return true;
 }
-function authLockEnd() { _authOpInProgress = false; }
+function authLockEnd() { _authOpInProgress = false; clearTimeout(_authOpTimer); _authOpTimer = null; }
+export function isAuthOpActive() { return _authOpInProgress || _loginInFlight; }
+// تسجيل خروج متعمَّد من التطبيق (doLogout/رفض الدور): مستمع "مفيش مستخدم" في main.js لا يعيد التوجيه/يمسح الحالة لما يوصله حدث الخروج ده.
+let _expectSignOutUntil = 0;
+export function takeExpectedSignOut() { const ok = Date.now() < _expectSignOutUntil; _expectSignOutUntil = 0; return ok; }
+// وضع التشخيص (لا يعرض أسرارًا): يضيف رمز خطأ Firebase للرسالة. يُفعَّل بـ window.DEBUG_ERRORS=true أو localStorage.matlabk_debug_auth='1'.
+function authDebugOn() { try { return window.DEBUG_ERRORS === true || localStorage.getItem('matlabk_debug_auth') === '1'; } catch(e) { return window.DEBUG_ERRORS === true; } }
+const withCode = (msg, e) => (authDebugOn() && e && e.code ? msg + ' [' + e.code + ']' : msg);
 
 // ===== شاشة الدخول (MATLABK): حالة التحميل والأخطاء داخل الشاشة نفسها =====
 // كل أزرار المصادقة (Google/بريد/إنشاء/استعادة): زر واحد فقط يظهر عليه التحميل، والباقي يتعطل أثناء أي عملية معلّقة.
@@ -83,6 +99,7 @@ export function resetLoginState() { setLoginBusy(false); authLockEnd(); }
 const REDIRECT_PENDING_KEY = 'matlabk_redirect_pending'; // يُكتب قبل أي تحويل redirect، المسار البديل فقط
 export function hasRedirectPending() { try { return isRedirectPendingValid(sessionStorage.getItem(REDIRECT_PENDING_KEY)); } catch(e) { return false; } }
 export function clearRedirectPending() { try { sessionStorage.removeItem(REDIRECT_PENDING_KEY); } catch(e) {} }
+try { if (!hasRedirectPending()) sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) { /* تخزين غير متاح: لا يوجد شيء متبقٍ أصلًا */ }
 export function showLoginError(msg, { retry = false } = {}) {
   // نفس الرسالة في شاشة الدخول والصفحة الرئيسية (اللي ظاهرة منهم هي اللي يشوفها المستخدم) - مفيش رسالة تضيع.
   for (const id of ['err-msg', 'home-err', 'su-err', 'fg-err']) { const e = document.getElementById(id); if (e) { e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none'; if (msg && e.scrollIntoView) { try { e.scrollIntoView({ block: 'nearest' }); } catch(x) {} } } }
@@ -138,7 +155,7 @@ export async function loginGoogle(type) {
     clearEntryIntent();
     resetLoginState();
     const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
-    if (!d.silent) showLoginError(d.message);
+    if (!d.silent) showLoginError(withCode(d.message, e));
     if (d.offerRedirect) showAltLogin(true);
     console.warn('[auth] popup sign-in failed:', e?.code || e);
   }
@@ -172,7 +189,7 @@ export async function emailLogin(ev) {
   } catch(e) {
     clearEntryIntent(); resetLoginState();
     const pw = document.getElementById('em-pass'); if (pw) pw.value = '';
-    showLoginError(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message);
+    showLoginError(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e));
     console.warn('[auth] email sign-in failed:', e?.code || 'unknown');
   }
 }
@@ -194,7 +211,7 @@ export async function emailSignup(ev) {
   } catch(e) {
     clearEntryIntent(); resetLoginState();
     for (const id of ['su-pass', 'su-pass2']) { const x = document.getElementById(id); if (x) x.value = ''; }
-    showLoginError(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message);
+    showLoginError(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e));
     console.warn('[auth] email sign-up failed:', e?.code || 'unknown');
   }
 }
@@ -214,7 +231,7 @@ export async function emailReset(ev) {
   } catch(e) {
     // مسجّل/غير مسجّل: نفس الرد المحايد. باقي الأخطاء (صيغة/اتصال/محاولات كثيرة) رسائل عربية واضحة.
     if (e?.code === 'auth/user-not-found') { done(RESET_SENT, false); return; }
-    done(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, true);
+    done(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e), true);
     console.warn('[auth] reset-email failed:', e?.code || 'unknown');
   }
 }
@@ -278,7 +295,8 @@ export async function doLogout() {
   clearAuthForms(); clearEntryIntent(); _lastAttempt = null; // الدور المختار القديم لا يبقى عالقًا بعد الخروج
   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
   window.CUD = null; window.CU = null; window.uploadedDocs = {};
-  try { await signOut(auth); } catch(e) {}
+  if (auth.currentUser) _expectSignOutUntil = Date.now() + 5000; // الحدث الناتج عن هذا الخروج لا يعيد التوجيه من main.js
+  try { await signOut(auth); } catch(e) { console.warn('[auth] signOut failed:', e?.code || 'unknown'); }
   window.selectedType = null; showLoginError(''); resetLoginState(); showAltLogin(false); clearRedirectPending();
   showScreen('screen-entry');
 }
@@ -338,7 +356,11 @@ export async function completeRegistration(role) {
     else if (role === 'merchant') showScreen('screen-complete-merchant');
     else routeUser();
   } catch(e) {
-    showToast('حدث خطأ، حاول مرة أخرى','err');
+    // حساب Firebase اتعمل لكن ملف المستخدم لم يُحفظ (قواعد/شبكة): لا نبتلع الخطأ. نسجّل الرمز، ونرجّع المستخدم لشاشة الدور
+    // برسالة واضحة + إعادة محاولة بنفس الدور (completeRegistration idempotent: لو المستند اتعمل لا يتكرر ولا يتغير الدور).
+    console.error('[auth] profile creation failed:', e?.code || 'unknown');
+    _lastAttempt = { intent: role, fresh: true, method: _lastMethod };
+    openLogin(role); showLoginError(withCode(MSG_PROFILE_CREATE_FAILED, e), { retry: true });
   } finally {
     _registrationInProgress = false;
     document.querySelectorAll('#screen-role-select .role-btn').forEach(b => b.style.pointerEvents = '');
@@ -413,7 +435,8 @@ export function editMerchantProfile() { showScreen('screen-complete-merchant'); 
 // ===== بوابة الدور: تُنفَّذ بعد تأكيد Firebase للجلسة، وقبل تحميل أي بيانات خاصة بدور أو فتح أي لوحة =====
 // مسار واحد لكل حالات الدخول: popup / redirect / استعادة جلسة / نفس المستخدم داخل بالفعل.
 // attempt = { intent, fresh } من captureLoginIntent(). المصدر الوحيد للدور الفعلي: users/{uid} في Firestore.
-let _lastAttempt = null; // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
+let _lastAttempt = null;
+let _lastMethod = 'google'; // طريقة آخر دخول التقطه captureLoginIntent (لإعادة المحاولة) // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
 export async function handleSignedIn(user, attempt = {}) {
   const intent = attempt.intent || null, fresh = !!attempt.fresh, method = attempt.method === 'email' ? 'email' : 'google';
   window.CU = user; window.CUD = null; // لا لوحة تُفتح قبل ما الدور يتأكد
@@ -428,7 +451,7 @@ export async function handleSignedIn(user, attempt = {}) {
     _lastAttempt = { intent, fresh, method }; window.CUD = null;
     hideLoading();
     if (fresh && INTENT_ROLES.includes(intent)) openLogin(intent); else showScreen('screen-entry');
-    showLoginError(MSG_USER_LOAD_FAILED, { retry: true });
+    showLoginError(withCode(MSG_USER_LOAD_FAILED, e), { retry: true });
     return;
   }
   _lastAttempt = null;

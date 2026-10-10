@@ -13,7 +13,7 @@ import { delProd, loadMerchantData, loadMerchantOrders, loadMerchantProds, merch
 import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
 import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
 import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, emailLogin, emailSignup, emailReset, openSignup, openForgot, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
+import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, isAuthOpActive, takeExpectedSignOut, emailLogin, emailSignup, emailReset, openSignup, openForgot, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
 import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
 import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
 import { renderIcons } from './icons.js';
@@ -129,14 +129,21 @@ onAuthStateChanged(auth, async user => {
       showScreen('screen-entry'); showLoginError(firebaseAuthErrorMessage(e));
     }
   } else {
+    // حدث "مفيش مستخدم" لا يعيد التوجيه ولا يمسح الدور المختار في حالتين: (1) خروج متعمَّد من التطبيق (doLogout/رفض دور) - الشاشة والحالة
+    // اتظبطوا هناك، وتوقيت وصول الحدث بالنسبة لـ signOut يختلف حسب الـ SDK. (2) عملية دخول/إنشاء حساب جارية (خروج من تاب تاني، إلخ) -
+    // نتيجتها هي اللي توجّه. قبل كده الحدث المتأخر كان يرجّع المستخدم للرئيسية ويمسح الدور (فيروح لاحقًا لشاشة اختيار دور أو لوحة بالدور المخزّن).
+    if (takeExpectedSignOut() || isAuthOpActive()) { window.CU = null; window.CUD = null; hideLoading(); return; }
     // MATLABK: "مفيش مستخدم" مش نهائي إلا بعد ما getRedirectResult يخلّص (منع race بين النتيجتين). لو كنا بادئين redirect نستنى أطول.
     const pending = hasRedirectPending();
     await withTimeout(redirectSettled, pending ? 12000 : 3000);
+    // أثناء الانتظار ممكن تبدأ عملية دخول أو يحصل خروج متعمَّد: نعيد الفحص قبل أي توجيه/مسح حالة.
+    if (isAuthOpActive() || takeExpectedSignOut()) { window.CU = null; window.CUD = null; hideLoading(); return; }
     const out = signedOutOutcome({ currentUser: auth.currentUser, redirectPending: pending, existingError: redirectErrorShown });
     if (out.action === 'ignore') return; // الجلسة اتأكدت فعليًا - الـ callback الخاص بالمستخدم هو اللي بيوجّه
     window.CU = null; window.CUD = null;
-    hideLoading(); resetLoginState(); clearRedirectPending();
-    const keep = out.error ? peekEntryType() : null; clearEntryIntent();
+    hideLoading(); resetLoginState();
+    const keep = out.error ? peekEntryType() : null; // قبل clearRedirectPending: تخزين الدور المختار يُعتمد فقط أثناء redirect
+    clearRedirectPending(); clearEntryIntent();
     if (keep) openLogin(keep); else showScreen('screen-entry');
     if (out.error) showLoginError(out.error); // رجوع من Google بدون جلسة: رسالة واضحة بدل الرجوع الصامت لشاشة الدخول
   }

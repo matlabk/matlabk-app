@@ -54,6 +54,10 @@ export const SESSION_NOT_READY = 'تم اختيار الحساب لكن تعذّ
 
 export function describeAuthError(e, { online = true, method = 'google' } = {}) {
   if (online === false) return { message: OFFLINE_ERROR, silent: false, offerRedirect: false };
+  // أخطاء إعدادات المشروع (قيود مفتاح API على النطاق، مفتاح غير صالح، تطبيق غير مصرّح...): تؤثر على كل طرق الدخول معًا. رسالة تفرّق بينها
+  // وبين "خطأ غير متوقع" (الرمز الأصلي يظهر في وضع التشخيص وفي console).
+  const code = e && e.code;
+  if (typeof code === 'string' && (/^auth\/requests-from-referer-/.test(code) || CONFIG_ERROR_CODES.has(code))) return { message: CONFIG_ERROR, silent: false, offerRedirect: false };
   // رسائل البريد/كلمة المرور لها الأولوية في مسار البريد (operation-not-allowed و too-many-requests بنصوص تناسبه)؛ مسار Google بلا تغيير.
   const hit = (method === 'email' && EMAIL_TABLE[e && e.code]) || TABLE[e && e.code];
   return hit ? { silent: false, offerRedirect: false, ...hit } : { message: GENERIC_ERROR, silent: false, offerRedirect: false };
@@ -92,6 +96,10 @@ export const ROLE_UI = {
 export const MSG_USER_LOAD_FAILED = 'تعذّر تحميل بيانات حسابك. تأكد من الاتصال ثم اضغط «إعادة المحاولة».';
 export const MSG_INVALID_ROLE = 'بيانات حسابك غير مكتملة أو غير صالحة، ولا يمكن فتح أي لوحة الآن. تواصل مع الدعم لمراجعة الحساب.';
 export const MSG_INTENT_MISSING = 'لم نتمكن من تحديد نوع الحساب الذي اخترته. اختر نوع الحساب ثم سجّل الدخول مرة أخرى.';
+const CONFIG_ERROR_CODES = new Set(['auth/invalid-api-key', 'auth/api-key-not-valid.-please-pass-a-valid-api-key.', 'auth/app-not-authorized', 'auth/configuration-not-found', 'auth/project-not-found', 'auth/invalid-app-credential', 'auth/app-not-installed']);
+export const CONFIG_ERROR = 'تعذّر الاتصال بخدمة تسجيل الدخول بسبب إعدادات الخدمة. أبلغ الدعم بهذه المشكلة.';
+export const OP_TIMEOUT_ERROR = 'استغرقت العملية وقتًا أطول من المعتاد. تأكد من الاتصال ثم حاول مرة أخرى.';
+export const MSG_PROFILE_CREATE_FAILED = 'تم إنشاء حسابك لكن تعذّر حفظ بياناته. اضغط «إعادة المحاولة».';
 export const MSG_ROLE_REQUIRED = 'اختر نوع الحساب أولًا (عميل أو تاجر أو كابتن).';
 
 // رسالة التعارض. لا نكشف شيئًا عن حساب الإدارة (نص عام) - صاحب الحساب الحقيقي فقط هو اللي وصل لهنا بعد Google.
