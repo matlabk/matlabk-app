@@ -1,0 +1,1469 @@
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/css/styles.css proj/css/styles.css
+--- orig/css/styles.css	2026-10-13 04:27:06.000000000 +0000
++++ proj/css/styles.css	2026-10-14 10:54:26.584810024 +0000
+@@ -988,21 +988,3 @@
+ .rp-ic{width:48px;height:48px;border-radius:14px;background:var(--color-primary-soft);color:var(--color-primary);display:flex;align-items:center;justify-content:center;flex:none}
+ .rp-tx strong{display:block;font-size:16px;font-weight:800}
+ .rp-tx small{display:block;font-size:13px;color:var(--color-text-secondary);margin-top:3px}
+-
+-/* ===== MATLABK: الدخول بالبريد الإلكتروني (إضافة بجانب Google) ===== */
+-#screen-signup,#screen-forgot{background:#fff radial-gradient(70% 38% at 50% 0,var(--color-primary-soft),rgba(255,255,255,0));min-height:100vh;min-height:100dvh}
+-#screen-signup.active,#screen-forgot.active{display:block}
+-.em-div{display:flex;align-items:center;gap:12px;margin:18px 0 14px;color:var(--color-text-secondary);font-size:13px;font-weight:700}
+-.em-div::before,.em-div::after{content:"";flex:1;height:1px;background:var(--color-neutral-200)}
+-.em-form{display:flex;flex-direction:column;gap:6px;text-align:right}
+-.em-label{font-size:13px;font-weight:800;color:var(--color-text);margin-top:6px}
+-.em-input{width:100%;min-height:52px;padding:0 14px;border:1.5px solid var(--color-neutral-200);border-radius:14px;background:#fff;font-family:var(--font-family);font-size:16px;color:var(--color-text);text-align:left}
+-.em-input:focus-visible{outline:3px solid rgba(255,107,0,.45);outline-offset:1px;border-color:var(--color-primary)}
+-.em-input:disabled{background:#f3f4f6;color:#6b7280}
+-.em-submit{position:relative;width:100%;min-height:56px;margin-top:12px;border:none;border-radius:14px;background:var(--color-primary);color:#fff;font-family:var(--font-family);font-size:16px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px}
+-.em-submit:disabled{opacity:.7;cursor:not-allowed}
+-.em-submit:focus-visible{outline:3px solid rgba(255,107,0,.55);outline-offset:3px}
+-.em-submit .lg-spin{display:none}
+-.em-submit.is-loading .lg-spin{display:inline-block;border-color:rgba(255,255,255,.45);border-top-color:#fff}
+-.em-links{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:6px}
+-.em-ok{margin-top:10px;padding:10px 12px;border-radius:12px;background:#ECFDF3;color:#05603A;font-size:14px;font-weight:700;line-height:1.6}
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/firestore.rules proj/firestore.rules
+--- orig/firestore.rules	2026-10-13 04:27:06.000000000 +0000
++++ proj/firestore.rules	2026-10-13 23:20:50.287402122 +0000
+@@ -13,28 +13,57 @@
+         // HARDENING-2026: أدمن موقوف/محذوف (status) لا يحتفظ بالصلاحية. غياب status = مسموح (توافق مع حسابات الأدمن القائمة).
+         !(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('status', '') in ['blocked', 'deleted']);
+     }
+-    // HARDENING-2026: قيود كتابة الأدمن على users من العميل (لا تُستعمل لترقية أدوار ولا لتزوير اعتماد/رفض):
++    // HARDENING-2026b: قيود كتابة الأدمن على users من العميل (لا تُستعمل لترقية أدوار ولا لتجاوز شروط الاعتماد/الرفض):
+     //  - الدور ثابت حتى للأدمن (تعيين أول أدمن = يدوي من Console/Admin SDK فقط).
+-    //  - حقول الاعتماد approvedBy/approvedAt لا تُكتب إلا في انتقال pending -> active لكابتن/تاجر، بهوية الأدمن الحالي ووقت الخادم؛
+-    //    وللتاجر مع متجر active في نفس الدفعة (getAfter). حقول الرفض rejected* بنفس الشرط مع pending -> rejected ومتجر rejected.
++    //  - كابتن/تاجر: لا يخرج حساب من pending إلا بالاعتماد (يتطلب approvedBy=uid الأدمن + approvedAt=request.time + متجر active في نفس العملية للتاجر)
++    //    أو بالرفض (rejectedBy + rejectedAt + rejectReason غير فارغ + متجر rejected للتاجر). لا انتقال من incomplete/rejected/pending إلى مجموعة التشغيل بأي طريق آخر.
++    //  - الإيقاف/التفعيل/الحذف (active/paused/blocked/deleted) بين حالات التشغيل فقط وبدون لمس حقول الاعتماد/الرفض.
++    //  - غير الكابتن/التاجر (عميل/أدمن): لا تُكتب حقول الاعتماد/الرفض إطلاقًا.
++    function approvalTouched() {
++      return request.resource.data.diff(resource.data).affectedKeys()
++        .hasAny(['approvedBy', 'approvedAt', 'rejectedBy', 'rejectedAt', 'rejectReason', 'rejectionReason', 'approvalStatus']);
++    }
++    function opsStatus(s) { return s in ['active', 'paused', 'blocked', 'deleted']; }
++    function adminApprovalOk(userId) {
++      return resource.data.get('status', '') == 'pending' && request.resource.data.get('status', '') == 'active' &&
++        request.resource.data.get('approvedBy', '') == request.auth.uid &&
++        request.resource.data.get('approvedAt', null) == request.time &&
++        (resource.data.role != 'merchant' ||
++          getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'active');
++    }
++    function adminRejectionOk(userId) {
++      return resource.data.get('status', '') == 'pending' && request.resource.data.get('status', '') == 'rejected' &&
++        request.resource.data.get('rejectedBy', '') == request.auth.uid &&
++        request.resource.data.get('rejectedAt', null) == request.time &&
++        request.resource.data.get('rejectReason', '') is string &&
++        request.resource.data.get('rejectReason', '').size() > 0 && request.resource.data.get('rejectReason', '').size() <= 500 &&
++        request.resource.data.get('rejectionReason', '') is string && request.resource.data.get('rejectionReason', '').size() <= 500 &&
++        (resource.data.role != 'merchant' ||
++          getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'rejected');
++    }
+     function adminUserUpdateOk(userId) {
+       return isAdmin() &&
+         request.resource.data.role == resource.data.role &&
+-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['approvedBy', 'approvedAt']) ||
+-          (request.resource.data.approvedBy == request.auth.uid && request.resource.data.approvedAt == request.time &&
+-           resource.data.get('status', '') == 'pending' && request.resource.data.status == 'active' &&
+-           resource.data.role in ['driver', 'merchant'] &&
+-           (resource.data.role != 'merchant' ||
+-             getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'active'))) &&
+-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['rejectedBy', 'rejectedAt', 'rejectReason', 'rejectionReason']) ||
+-          (request.resource.data.rejectedBy == request.auth.uid && request.resource.data.rejectedAt == request.time &&
+-           resource.data.get('status', '') == 'pending' && request.resource.data.status == 'rejected' &&
+-           resource.data.role in ['driver', 'merchant'] &&
+-           (resource.data.role != 'merchant' ||
+-             getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'rejected')));
++        ((resource.data.role in ['driver', 'merchant'] &&
++          ((request.resource.data.get('status', '') == resource.data.get('status', '') && !approvalTouched()) ||
++           adminApprovalOk(userId) || adminRejectionOk(userId) ||
++           (opsStatus(resource.data.get('status', '')) && opsStatus(request.resource.data.get('status', '')) && !approvalTouched()))) ||
++         (!(resource.data.role in ['driver', 'merchant']) && !approvalTouched()));
++    }
++    // HARDENING-2026b: حالة المتجر لا يغيّرها الأدمن من pending إلا بالتزامن مع حالة حساب التاجر المطابقة (نفس الدفعة/المعاملة):
++    // pending->active مع users.active، pending->rejected مع users.rejected. متاجر غير pending/rejected/incomplete تتنقل بين حالات التشغيل بحرية.
++    function adminStoreUpdateOk(storeId) {
++      return isAdmin() &&
++        (request.resource.data.get('status', '') == resource.data.get('status', '') ||
++         (resource.data.get('status', '') == 'pending' && request.resource.data.get('status', '') == 'active' &&
++           getAfter(/databases/$(database)/documents/users/$(storeId)).data.get('role', '') == 'merchant' &&
++           getAfter(/databases/$(database)/documents/users/$(storeId)).data.get('status', '') == 'active') ||
++         (resource.data.get('status', '') == 'pending' && request.resource.data.get('status', '') == 'rejected' &&
++           getAfter(/databases/$(database)/documents/users/$(storeId)).data.get('role', '') == 'merchant' &&
++           getAfter(/databases/$(database)/documents/users/$(storeId)).data.get('status', '') == 'rejected') ||
++         (!(resource.data.get('status', '') in ['pending', 'rejected', 'incomplete']) &&
++          !(request.resource.data.get('status', '') in ['pending', 'rejected', 'incomplete'])));
+     }
+-    // جديد: نتأكد إن اللي بيتصرف كمندوب هو فعلاً مسجل بدور "driver" ونشط،
+-    // مش أي مستخدم مسجل دخول بيبعت الطلب يدوي
+     function isActiveDriver() {
+       return isSignedIn() &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'driver' &&
+@@ -541,6 +570,7 @@
+       allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isMyActiveOrderCustomer(userId));
+ 
+       allow create: if isSignedIn() && request.auth.uid == userId &&
++        request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'role', 'points', 'photoURL', 'status', 'createdAt', 'updatedAt']) &&
+         request.resource.data.role in ['customer', 'merchant', 'driver'] &&
+         (
+           (request.resource.data.role == 'customer' && request.resource.data.status == 'active') ||
+@@ -694,7 +724,7 @@
+       allow create: if isSignedIn() && request.auth.uid == storeId &&
+         request.resource.data.status == 'pending' &&
+         getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'merchant';
+-      allow update: if isAdmin() || (
++      allow update: if adminStoreUpdateOk(storeId) || (
+         isSignedIn() && request.auth.uid == storeId &&
+         // AUTH-2026: حالة المتجر لا يغيّرها التاجر إلا rejected -> pending بالتزامن مع إعادة تقديم users.status=pending (getAfter)
+         (request.resource.data.status == resource.data.status ||
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/index.html proj/index.html
+--- orig/index.html	2026-10-13 04:27:06.000000000 +0000
++++ proj/index.html	2026-10-14 10:54:24.122103613 +0000
+@@ -117,18 +117,6 @@
+         <span class="lg-spin" aria-hidden="true"></span>
+       </button>
+       <p id="lg-role-note" class="lg-note"></p>
+-      <div class="em-div" role="separator" aria-label="أو"><span>أو</span></div>
+-      <form class="em-form" id="em-form" novalidate onsubmit="event.preventDefault();emailLogin(event)">
+-        <label class="em-label" for="em-email">البريد الإلكتروني</label>
+-        <input class="em-input" id="em-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+-        <label class="em-label" for="em-pass">كلمة المرور</label>
+-        <input class="em-input" id="em-pass" name="password" type="password" autocomplete="current-password" dir="ltr" required>
+-        <button type="submit" id="em-submit" class="em-submit"><span id="em-submit-label">تسجيل الدخول</span><span class="lg-spin" aria-hidden="true"></span></button>
+-        <div class="em-links">
+-          <button type="button" id="em-forgot" class="lg-link" onclick="openForgot()">نسيت كلمة المرور؟</button>
+-          <button type="button" id="em-signup" class="lg-link" onclick="openSignup()">إنشاء حساب جديد</button>
+-        </div>
+-      </form>
+       <div class="lg-err-slot"><div id="err-msg" class="lg-err" role="alert" aria-live="assertive"></div></div>
+       <button type="button" id="lg-retry" class="lg-link lg-alt" hidden onclick="retryLoadAccount()">إعادة المحاولة</button>
+       <button type="button" id="lg-alt" class="lg-link lg-alt" hidden onclick="loginGoogleRedirect()">المتابعة بدون نافذة منبثقة</button>
+@@ -137,45 +125,6 @@
+   </div>
+ </div>
+ 
+-<!-- ===== إنشاء حساب بالبريد الإلكتروني (الدور المختار محفوظ من شاشة الدخول) ===== -->
+-<div id="screen-signup" class="screen">
+-  <div class="lg-wrap">
+-    <button type="button" id="su-back" class="lg-back" onclick="openLogin(window.selectedType)"><span aria-hidden="true">→</span> رجوع لتسجيل الدخول</button>
+-    <header class="lg-brand rp-head">
+-      <h1 class="rp-title">إنشاء حساب جديد</h1>
+-      <p class="lg-sub">بالبريد الإلكتروني وكلمة المرور</p>
+-    </header>
+-    <form class="em-form" id="su-form" novalidate onsubmit="event.preventDefault();emailSignup(event)">
+-      <label class="em-label" for="su-email">البريد الإلكتروني</label>
+-      <input class="em-input" id="su-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+-      <label class="em-label" for="su-pass">كلمة المرور (8 أحرف على الأقل)</label>
+-      <input class="em-input" id="su-pass" name="new-password" type="password" autocomplete="new-password" minlength="8" dir="ltr" required>
+-      <label class="em-label" for="su-pass2">تأكيد كلمة المرور</label>
+-      <input class="em-input" id="su-pass2" name="confirm-password" type="password" autocomplete="new-password" dir="ltr" required>
+-      <button type="submit" id="su-submit" class="em-submit"><span id="su-submit-label">إنشاء الحساب</span><span class="lg-spin" aria-hidden="true"></span></button>
+-      <div class="lg-err-slot"><div id="su-err" class="lg-err" role="alert" aria-live="assertive"></div></div>
+-    </form>
+-    <p class="lg-legal">بمتابعتك، أنت توافق على شروط الاستخدام وسياسة الخصوصية.</p>
+-  </div>
+-</div>
+-
+-<!-- ===== استعادة كلمة المرور (رسالة Firebase الرسمية) ===== -->
+-<div id="screen-forgot" class="screen">
+-  <div class="lg-wrap">
+-    <button type="button" id="fg-back" class="lg-back" onclick="openLogin(window.selectedType)"><span aria-hidden="true">→</span> رجوع لتسجيل الدخول</button>
+-    <header class="lg-brand rp-head">
+-      <h1 class="rp-title">استعادة كلمة المرور</h1>
+-      <p class="lg-sub">اكتب بريدك الإلكتروني وسنرسل لك رابط إعادة التعيين</p>
+-    </header>
+-    <form class="em-form" id="fg-form" novalidate onsubmit="event.preventDefault();emailReset(event)">
+-      <label class="em-label" for="fg-email">البريد الإلكتروني</label>
+-      <input class="em-input" id="fg-email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" dir="ltr" placeholder="name@example.com" required>
+-      <button type="submit" id="fg-submit" class="em-submit"><span id="fg-submit-label">إرسال رابط الاستعادة</span><span class="lg-spin" aria-hidden="true"></span></button>
+-      <div class="lg-err-slot"><div id="fg-err" class="lg-err" role="alert" aria-live="assertive"></div><div id="fg-ok" class="em-ok" role="status" aria-live="polite" style="display:none"></div></div>
+-    </form>
+-  </div>
+-</div>
+-
+ <!-- ===== AUTHENTICATION V2 — ROLE SELECT SCREEN (بعد Authentication دائمًا، لكل Provider) ===== -->
+ <div id="screen-role-select" class="screen">
+   <div class="auth-logo" style="margin-bottom:36px">
+@@ -1293,11 +1242,6 @@
+ </div>
+ 
+ <!-- ===== SCRIPTS ===== -->
+-<script>
+-  // حارس نماذج المصادقة (يعمل حتى لو فشل تحميل وحدات JS): إرسال النموذج الأصلي يعيد تحميل الصفحة ويضع البريد وكلمة المرور في الرابط.
+-  // نمنعه دائمًا؛ المعالج الفعلي (onsubmit) هو اللي ينفّذ الدخول.
+-  document.addEventListener('submit', function (e) { var t = e.target; if (t && t.classList && t.classList.contains('em-form')) e.preventDefault(); }, true);
+-</script>
+ <script type="module" src="js/firebase.js"></script>
+ <script type="module" src="js/main.js"></script>
+ 
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/js/auth-flow.js proj/js/auth-flow.js
+--- orig/js/auth-flow.js	2026-10-13 04:27:06.000000000 +0000
++++ proj/js/auth-flow.js	2026-10-14 10:54:18.162778064 +0000
+@@ -16,50 +16,18 @@
+   'auth/web-storage-unsupported': { message: 'متصفحك يمنع حفظ بيانات الدخول. فعّل التخزين أو جرّب متصفحًا آخر.' },
+   'auth/account-exists-with-different-credential': { message: 'هذا البريد مسجّل بطريقة دخول قديمة لم تعد مدعومة. تواصل مع الإدارة لمساعدتك.' },
+ };
+-// أخطاء البريد وكلمة المرور (رسائل عامة: لا نفرّق بين "البريد غير موجود" و"كلمة المرور غلط" عشان ما نكشفش مين مسجّل)
+-const BAD_CREDENTIALS = 'البريد الإلكتروني أو كلمة المرور غير صحيحة. إذا كنت سجّلت سابقًا عبر Google فاستخدم زر Google.';
+-const EMAIL_TABLE = {
+-  'auth/invalid-credential': { message: BAD_CREDENTIALS },
+-  'auth/wrong-password': { message: BAD_CREDENTIALS },
+-  'auth/user-not-found': { message: BAD_CREDENTIALS },
+-  'auth/invalid-login-credentials': { message: BAD_CREDENTIALS },
+-  'auth/invalid-email': { message: 'صيغة البريد الإلكتروني غير صحيحة. تأكد منه وحاول مرة أخرى.' },
+-  'auth/missing-password': { message: 'اكتب كلمة المرور.' },
+-  'auth/email-already-in-use': { message: 'هذا البريد الإلكتروني مسجّل بالفعل (ربما عبر Google). سجّل الدخول بالطريقة التي استخدمتها، أو اضغط «نسيت كلمة المرور؟».' },
+-  'auth/weak-password': { message: 'كلمة المرور ضعيفة. استخدم 8 أحرف على الأقل.' },
+-  'auth/operation-not-allowed': { message: 'الدخول بالبريد الإلكتروني غير متاح حاليًا. استخدم Google أو تواصل مع الدعم.' },
+-  'auth/too-many-requests': { message: 'محاولات كثيرة متتالية. انتظر قليلًا ثم حاول مرة أخرى، أو استعد كلمة المرور.' },
+-};
+-export const MIN_PASSWORD_LENGTH = 8;
+-export const RESET_SENT = 'إذا كان هذا البريد مسجّلًا لدينا، فسيصلك رابط لإعادة تعيين كلمة المرور خلال دقائق. راجع الرسائل غير المرغوبة أيضًا.';
+-export const normalizeEmail = (v) => String(v == null ? '' : v).trim();
+-// تحقق بسيط للصيغة (التحقق النهائي من Firebase): شيء@شيء.شيء بدون مسافات
+-export function isValidEmail(v) { const e = normalizeEmail(v); return e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e); }
+-export function validateEmailLogin({ email, password }) {
+-  if (!isValidEmail(email)) return { ok: false, message: EMAIL_TABLE['auth/invalid-email'].message };
+-  if (typeof password !== 'string' || password.length === 0) return { ok: false, message: EMAIL_TABLE['auth/missing-password'].message };
+-  return { ok: true };
+-}
+-export function validateSignup({ email, password, confirm }) {
+-  if (!isValidEmail(email)) return { ok: false, message: EMAIL_TABLE['auth/invalid-email'].message };
+-  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) return { ok: false, message: `كلمة المرور يجب ألا تقل عن ${MIN_PASSWORD_LENGTH} أحرف.` };
+-  if (password.length > 128) return { ok: false, message: 'كلمة المرور طويلة جدًا (الحد الأقصى 128 حرفًا).' };
+-  if (password !== confirm) return { ok: false, message: 'كلمتا المرور غير متطابقتين.' };
+-  return { ok: true };
+-}
+ export const GENERIC_ERROR = 'حدث خطأ غير متوقع. حاول مرة أخرى.';
+ export const OFFLINE_ERROR = 'لا يوجد اتصال بالإنترنت. تأكد من الشبكة وحاول مرة أخرى.';
+ export const REDIRECT_FAILED = 'تعذّر إكمال تسجيل الدخول بعد العودة من Google على هذا المتصفح. جرّب "المتابعة باستخدام Google" مرة أخرى بالنافذة المنبثقة، أو افتح الموقع من متصفح آخر.';
+ export const SESSION_NOT_READY = 'تم اختيار الحساب لكن تعذّر إكمال الدخول. تأكد من الاتصال وحاول مرة أخرى.';
+ 
+-export function describeAuthError(e, { online = true, method = 'google' } = {}) {
++export function describeAuthError(e, { online = true } = {}) {
+   if (online === false) return { message: OFFLINE_ERROR, silent: false, offerRedirect: false };
+   // أخطاء إعدادات المشروع (قيود مفتاح API على النطاق، مفتاح غير صالح، تطبيق غير مصرّح...): تؤثر على كل طرق الدخول معًا. رسالة تفرّق بينها
+   // وبين "خطأ غير متوقع" (الرمز الأصلي يظهر في وضع التشخيص وفي console).
+   const code = e && e.code;
+   if (typeof code === 'string' && (/^auth\/requests-from-referer-/.test(code) || CONFIG_ERROR_CODES.has(code))) return { message: CONFIG_ERROR, silent: false, offerRedirect: false };
+-  // رسائل البريد/كلمة المرور لها الأولوية في مسار البريد (operation-not-allowed و too-many-requests بنصوص تناسبه)؛ مسار Google بلا تغيير.
+-  const hit = (method === 'email' && EMAIL_TABLE[e && e.code]) || TABLE[e && e.code];
++  const hit = TABLE[e && e.code];
+   return hit ? { silent: false, offerRedirect: false, ...hit } : { message: GENERIC_ERROR, silent: false, offerRedirect: false };
+ }
+ 
+@@ -104,25 +72,25 @@
+ export const MSG_ROLE_REQUIRED = 'اختر نوع الحساب أولًا (عميل أو تاجر أو كابتن).';
+ 
+ // رسالة التعارض. لا نكشف شيئًا عن حساب الإدارة (نص عام) - صاحب الحساب الحقيقي فقط هو اللي وصل لهنا بعد Google.
+-export function roleIntentConflict(intent, role, method = 'google') {
++export function roleIntentConflict(intent, role) {
+   if (!INTENT_AS[intent]) return null;
+   if (!ROLE_LABELS[role]) return null; // الدور غير المعروف يعالجه evaluateRoleGate (deny) - مش تصريح
+   if (role === intent) return null;
+   // حساب الإدارة بيدخل من زر "عميل" (بدون خيار ظاهر للإدارة)؛ الصلاحية الفعلية من users.role في Firestore.
+   if (role === 'admin' && intent === 'customer') return null;
+   const registered = role === 'admin' ? 'بحساب آخر في MATLABK' : `كحساب ${ROLE_LABELS[role]}`;
+-  const other = method === 'email' ? 'ببريد إلكتروني آخر' : 'ببريد Google آخر';
++  const other = 'ببريد Google آخر';
+   return `هذا البريد الإلكتروني مسجّل بالفعل ${registered}. لاستخدام MATLABK ${INTENT_AS[intent]}، يُرجى تسجيل الدخول ${other}.`;
+ }
+ 
+ // قرار البوابة بعد تأكيد Firebase للجلسة وقراءة users/{uid} (دالة نقية - مصدر القرار الوحيد قبل فتح أي لوحة):
+ //  register: لا يوجد مستند مستخدم (حساب جديد)  |  allow: يُوجَّه حسب الدور المخزّن
+ //  reject: تعارض دور (رسالة + خروج، الرجوع لشاشة الدخول بنفس الدور)  |  deny: حالة غير آمنة (رسالة + خروج)
+-export function evaluateRoleGate({ intent = null, fresh = false, exists, role, method = 'google' }) {
++export function evaluateRoleGate({ intent = null, fresh = false, exists, role }) {
+   if (!exists) return { action: 'register' };
+   if (!ROLE_LABELS[role]) return { action: 'deny', reason: 'invalid-role', message: MSG_INVALID_ROLE };
+   if (fresh && !INTENT_ROLES.includes(intent)) return { action: 'deny', reason: 'intent-missing', message: MSG_INTENT_MISSING };
+-  const msg = roleIntentConflict(intent, role, method);
++  const msg = roleIntentConflict(intent, role);
+   if (msg) return { action: 'reject', reason: 'role-mismatch', message: msg };
+   return { action: 'allow' };
+ }
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/js/auth.js proj/js/auth.js
+--- orig/js/auth.js	2026-10-13 04:27:06.000000000 +0000
++++ proj/js/auth.js	2026-10-14 10:54:18.163438720 +0000
+@@ -1,14 +1,14 @@
+ // ===== auth.js — تسجيل الدخول/إنشاء حساب، التوجيه بعد الدخول (Routing)، مزامنة HubSpot =====
+ 
+-import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from './firebase.js';
+-import { INTENT_ROLES, INTENT_TTL_MS, RESET_SENT, OP_TIMEOUT_ERROR, MSG_PROFILE_CREATE_FAILED, MSG_STALE_ATTEMPT, MSG_INTENT_MISSING, GENERIC_ERROR, isValidEmail, normalizeEmail, validateEmailLogin, validateSignup, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
++import { auth, db, doc, getDoc, gProvider, runTransaction, serverTimestamp, setDoc, signInWithPopup, signInWithRedirect, signOut, updateDoc } from './firebase.js';
++import { INTENT_ROLES, INTENT_TTL_MS, OP_TIMEOUT_ERROR, MSG_PROFILE_CREATE_FAILED, MSG_STALE_ATTEMPT, MSG_INTENT_MISSING, GENERIC_ERROR, MSG_INVALID_ROLE, MSG_ROLE_REQUIRED, MSG_USER_LOAD_FAILED, OFFLINE_ERROR, ROLE_UI, SESSION_NOT_READY, decodeIntent, describeAuthError, encodeIntent, evaluateRoleGate, isRedirectPendingValid } from './auth-flow.js';
+ import { loadBanners, loadCategories, loadCoupons, loadCustomerData, loadProducts } from './customer.js';
+ import { isCustomerProfileComplete, isValidPhoneStrict, normalizePhone, resolveRoute, STATUS } from './account-state.js';
+ 
+ export const ENTRY_TYPE_KEY = 'matlabk_entry_type'; // الدور المختار قبل دخول Google، مخزّن مؤقتًا في sessionStorage لنجاة إعادة التحميل فقط - مش مصدر صلاحيات
+ // الدور المختار يُحفظ في الذاكرة (مسار popup) + sessionStorage (مسار redirect/إعادة تحميل) ويُستهلك مرة واحدة في بوابة الدور.
+ let _pendingIntent = null; // { type, ts }
+-let _loginMethod = 'google'; // 'google' | 'email' - يغيّر صياغة رسالة التعارض فقط، ولا يؤثر على قرار الصلاحيات
++let _loginMethod = 'google'; // Google هو مزوّد الدخول الوحيد (يُحفظ مع المحاولة للاتساق فقط، ولا يؤثر على قرار الصلاحيات)
+ let _loginInFlight = false; // true من لحظة الضغط على Google حتى تأكيد Firebase للجلسة (يميّز الدخول الجديد عن الجلسة المستعادة)
+ export function setEntryIntent(type) {
+   const raw = encodeIntent(type); if (!raw) return false;
+@@ -66,14 +66,14 @@
+ }
+ 
+ // ===== Phase 2: Prevent Double Authentication =====
+-// قفل واحد بسيط يمنع تشغيل أكتر من عملية Authentication (Google/Email Login/Register/Reset)
++// قفل واحد بسيط يمنع تشغيل أكتر من عملية Authentication (Google)
+ // في نفس اللحظة - بيتفعّل مع أول عملية وبيتحرر تلقائيًا لما تخلص (نجاح أو فشل).
+ let _authOpInProgress = false;
+ let _authOpTimer = null;
+ // مهلة أقصى لأي عملية مصادقة معلّقة (نافذة Google عالقة، شبكة لا ترد...): بعدها تُفك الأزرار وتظهر رسالة بدل التجمّد بلا تفسير.
+ const authOpTimeoutMs = () => (Number.isFinite(window.AUTH_OP_TIMEOUT_MS) ? window.AUTH_OP_TIMEOUT_MS : 45000);
+ // ===== دورة حياة محاولات المصادقة (Attempts) =====
+-// Firebase لا يوفّر إلغاءً لـ signInWithPopup/signInWithEmailAndPassword: "انتهاء المهلة" يعني أننا توقفنا عن الانتظار فقط، والعملية قد تكتمل لاحقًا
++// Firebase لا يوفّر إلغاءً لـ signInWithPopup: "انتهاء المهلة" يعني أننا توقفنا عن الانتظار فقط، والعملية قد تكتمل لاحقًا
+ // وتنشئ جلسة. لذلك كل محاولة لها رقم وحالة: pending | settled (أخذت credential وتنتظر البوابة) | superseded | timedout | cancelled | abandoned.
+ // القاعدة: المحاولة الحالية فقط هي اللي تملك الدور المختار وقفل الواجهة. نتيجة (نجاح/فشل) محاولة قديمة لا تمسح ولا تغيّر حالة محاولة أحدث.
+ // نجاح محاولة قديمة = جلسة لم يعد لها صاحب: لا تُوجَّه لأي لوحة، وتُنهى فقط لو أثبتنا أنها غير مسبوقة بجلسة سليمة (discardStaleSession).
+@@ -129,22 +129,17 @@
+ // كل أزرار المصادقة (Google/بريد/إنشاء/استعادة): زر واحد فقط يظهر عليه التحميل، والباقي يتعطل أثناء أي عملية معلّقة.
+ const AUTH_BTNS = {
+   google: { btn: 'lg-google', label: 'lg-google-label', text: 'المتابعة باستخدام Google' },
+-  email: { btn: 'em-submit', label: 'em-submit-label', text: 'تسجيل الدخول' },
+-  signup: { btn: 'su-submit', label: 'su-submit-label', text: 'إنشاء الحساب' },
+-  reset: { btn: 'fg-submit', label: 'fg-submit-label', text: 'إرسال رابط الاستعادة' },
+ };
+-const AUTH_AUX = ['lg-back', 'lg-retry', 'em-forgot', 'em-signup', 'su-back', 'fg-back', 'em-email', 'em-pass', 'su-email', 'su-pass', 'su-pass2', 'fg-email'];
+-function setLoginBusy(on, label, which = 'google') {
++const AUTH_AUX = ['lg-back', 'lg-retry'];
++function setLoginBusy(on, label) {
+   for (const k of Object.keys(AUTH_BTNS)) {
+     const c = AUTH_BTNS[k]; const b = document.getElementById(c.btn); if (!b) continue;
+-    const isActive = !!on && k === which;
++    const isActive = !!on;
+     b.disabled = !!on; b.setAttribute('aria-busy', isActive ? 'true' : 'false'); b.classList.toggle('is-loading', isActive);
+     const l = document.getElementById(c.label); if (l) l.textContent = isActive ? (label || 'جاري فتح Google…') : c.text;
+   }
+   for (const id of AUTH_AUX) { const x = document.getElementById(id); if (x) x.disabled = !!on; }
+ }
+-// مسح حقول البريد/كلمة المرور من الواجهة (كلمة المرور لا تُحفظ في أي مكان؛ هنا بنفضّي الحقول بعد الاستخدام/الخروج)
+-function clearAuthForms() { for (const id of ['em-email', 'em-pass', 'su-email', 'su-pass', 'su-pass2', 'fg-email']) { const x = document.getElementById(id); if (x) x.value = ''; } }
+ function showAltLogin(on) { const el = document.getElementById('lg-alt'); if (el) el.hidden = !on; }
+ // بيتنادى من onAuthStateChanged (نجاح/فشل) ومن الخروج: يفك الزر والقفل - مفيش Loading عالق.
+ export function resetLoginState() { setLoginBusy(false); authLockEnd(); }
+@@ -154,8 +149,7 @@
+ try { if (!hasRedirectPending()) sessionStorage.removeItem(ENTRY_TYPE_KEY); } catch(e) { /* تخزين غير متاح: لا يوجد شيء متبقٍ أصلًا */ }
+ export function showLoginError(msg, { retry = false } = {}) {
+   // نفس الرسالة في شاشة الدخول والصفحة الرئيسية (اللي ظاهرة منهم هي اللي يشوفها المستخدم) - مفيش رسالة تضيع.
+-  for (const id of ['err-msg', 'home-err', 'su-err', 'fg-err']) { const e = document.getElementById(id); if (e) { e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none'; if (msg && e.scrollIntoView) { try { e.scrollIntoView({ block: 'nearest' }); } catch(x) {} } } }
+-  const ok = document.getElementById('fg-ok'); if (ok) { ok.textContent = ''; ok.style.display = 'none'; } // أي رسالة جديدة/مسح يخفي رسالة نجاح الاستعادة
++  for (const id of ['err-msg', 'home-err']) { const e = document.getElementById(id); if (e) { e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none'; if (msg && e.scrollIntoView) { try { e.scrollIntoView({ block: 'nearest' }); } catch(x) {} } } }
+   for (const id of ['lg-retry', 'home-retry']) { const r = document.getElementById(id); if (r) r.hidden = !(msg && retry); }
+ }
+ // الرجوع للصفحة بزر Back بعد تحويل Google (bfcache) لازم يفك الزر والقفل
+@@ -173,14 +167,14 @@
+ // والمتصفحات الحديثة بتحجب تخزين الطرف الثالث => signInWithRedirect بيرجع بدون جلسة (نتيجة فاضية بدون خطأ). الـ Popup مش بيعتمد على كده.
+ // مهم: signInWithPopup لازم تتنادى في نفس الـ click handler قبل أي await عشان المتصفح ما يحجبش النافذة.
+ // تشغيل عملية Firebase للمحاولة + تطبيق قواعد الملكية: فشل/نجاح محاولة قديمة لا يمسح ولا يغيّر حالة المحاولة الأحدث.
+-async function runCredentialOp(att, op, method, label) {
++async function runCredentialOp(att, op, label) {
+   let cred;
+   try { cred = await op(); }
+   catch(e) {
+     att.opDone = true; retire(att);
+     if (!isLiveAttempt(att)) { console.warn('[auth] stale ' + label + ' failed:', e?.code || 'unknown'); return; }
+     endAttempt(att); resetLoginState();
+-    const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method });
++    const d = describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
+     if (!d.silent) showLoginError(withCode(d.message, e));
+     if (d.offerRedirect) showAltLogin(true);
+     console.warn('[auth] ' + label + ' failed:', e?.code || 'unknown');
+@@ -208,7 +202,7 @@
+   }
+   // الدخول الفعلي يؤكده onAuthStateChanged فقط (هو اللي يوجّه ويفك الزر). لو لسه ماوصلش نغيّر الوصف ونراقب.
+   if (!window.CU) {
+-    setLoginBusy(true, 'جاري تسجيل دخولك…', _busyWhich);
++    setLoginBusy(true, 'جاري تسجيل دخولك…');
+     timer(() => { if (!window.CU && !att.handled && _cur === att) { resetLoginState(); showLoginError(SESSION_NOT_READY); } }, 15000);
+   }
+ }
+@@ -249,7 +243,6 @@
+   for (const [, p] of _parked) clearTimeout(p.timer);
+   _attempts.clear(); _parked.clear(); _cur = null; _gen = 0; authLockEnd(); _expectSignOutUntil = 0; clearEntryIntent();
+ }
+-let _busyWhich = 'google';
+ 
+ export async function loginGoogle(type) {
+   // النوع (عميل أو كابتن أو تاجر). لو مفيش نوع صالح (لا وسيط ولا اختيار سابق) => لا نفتح Google ولا نفترض "عميل": نرجّع المستخدم لاختيار نوع الحساب.
+@@ -259,71 +252,15 @@
+   window.selectedType = role;
+   showLoginError(''); showAltLogin(false);
+   if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); endAttempt(att); retire(att); authLockEnd(); return; }
+-  _busyWhich = 'google'; setLoginBusy(true, 'جاري فتح Google…');
+-  await runCredentialOp(att, () => signInWithPopup(auth, gProvider), 'google', 'popup sign-in');
++  setLoginBusy(true, 'جاري فتح Google…');
++  await runCredentialOp(att, () => signInWithPopup(auth, gProvider), 'popup sign-in');
+ }
+ 
+ 
+ 
+-// ===== المصادقة بالبريد الإلكتروني وكلمة المرور (إضافة بجانب Google - نفس نظام الأدوار والبوابة) =====
+-// مبادئ: كلمة المرور تُقرأ من الحقل وتمر مباشرة إلى Firebase Auth (لا تُخزَّن ولا تُسجَّل ولا تُرسل لـ Firestore)؛
+-// الدور المختار يُحفظ قبل أي طلب؛ نجاح المصادقة لا يفتح لوحة: القرار دائمًا من handleSignedIn (users/{uid}).
+-function _val(id) { return document.getElementById(id)?.value ?? ''; }
+-function _chosenRole() {
+-  const role = window.selectedType;
+-  if (INTENT_ROLES.includes(role)) return role;
+-  openRolePick(); showLoginError(MSG_ROLE_REQUIRED); return null;
+-}
+-export async function emailLogin(ev) {
+-  if (ev && ev.preventDefault) ev.preventDefault();
+-  const role = _chosenRole(); if (!role) return;
+-  const email = normalizeEmail(_val('em-email')), password = _val('em-pass');
+-  const v = validateEmailLogin({ email, password });
+-  if (!v.ok) { showLoginError(v.message); return; }
+-  const att = startAttempt(role, 'email'); if (!att) return; // قفل: منع الضغط المتكرر
+-  showLoginError(''); showAltLogin(false);
+-  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); endAttempt(att); retire(att); authLockEnd(); return; }
+-  _busyWhich = 'email'; setLoginBusy(true, 'جاري تسجيل الدخول…', 'email');
+-  await runCredentialOp(att, async () => { try { return await signInWithEmailAndPassword(auth, email, password); } finally { const pw = document.getElementById('em-pass'); if (pw) pw.value = ''; } }, 'email', 'email sign-in');
+-}
+-export async function emailSignup(ev) {
+-  if (ev && ev.preventDefault) ev.preventDefault();
+-  const role = _chosenRole(); if (!role) return;
+-  const email = normalizeEmail(_val('su-email')), password = _val('su-pass'), confirm = _val('su-pass2');
+-  const v = validateSignup({ email, password, confirm });
+-  if (!v.ok) { showLoginError(v.message); return; }
+-  const att = startAttempt(role, 'email'); if (!att) return; // الدور المختار يتحفظ: حساب جديد => completeRegistration(role) من البوابة
+-  showLoginError('');
+-  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); endAttempt(att); retire(att); authLockEnd(); return; }
+-  _busyWhich = 'signup'; setLoginBusy(true, 'جاري إنشاء الحساب…', 'signup');
+-  await runCredentialOp(att, async () => { try { return await createUserWithEmailAndPassword(auth, email, password); } finally { for (const id of ['su-pass', 'su-pass2']) { const x = document.getElementById(id); if (x) x.value = ''; } } }, 'email', 'email sign-up');
+-}
+-// استعادة كلمة المرور: آلية Firebase الرسمية فقط. الرد دايمًا محايد (لا نكشف هل البريد مسجّل أم لا).
+-export async function emailReset(ev) {
+-  if (ev && ev.preventDefault) ev.preventDefault();
+-  const email = normalizeEmail(_val('fg-email'));
+-  if (!isValidEmail(email)) { showLoginError('صيغة البريد الإلكتروني غير صحيحة. تأكد منه وحاول مرة أخرى.'); return; }
+-  if (!authLockStart()) return;
+-  showLoginError('');
+-  if (typeof navigator !== 'undefined' && navigator.onLine === false) { showLoginError(OFFLINE_ERROR); authLockEnd(); return; }
+-  _busyWhich = 'reset'; setLoginBusy(true, 'جاري الإرسال…', 'reset');
+-  const done = (msg, isErr) => { resetLoginState(); if (isErr) showLoginError(msg); else { const ok = document.getElementById('fg-ok'); if (ok) { ok.textContent = msg; ok.style.display = 'block'; } } };
+-  try {
+-    await sendPasswordResetEmail(auth, email);
+-    done(RESET_SENT, false);
+-  } catch(e) {
+-    // مسجّل/غير مسجّل: نفس الرد المحايد. باقي الأخطاء (صيغة/اتصال/محاولات كثيرة) رسائل عربية واضحة.
+-    if (e?.code === 'auth/user-not-found') { done(RESET_SENT, false); return; }
+-    done(withCode(describeAuthError(e, { online: typeof navigator === 'undefined' || navigator.onLine !== false, method: 'email' }).message, e), true);
+-    console.warn('[auth] reset-email failed:', e?.code || 'unknown');
+-  }
+-}
+-export function openSignup() { if (!INTENT_ROLES.includes(window.selectedType)) { openRolePick(); return; } setLoginBusy(false); showLoginError(''); showAltLogin(false); showScreen('screen-signup'); }
+-export function openForgot() { setLoginBusy(false); showLoginError(''); showScreen('screen-forgot'); }
+-
+ // ===== الصفحة الرئيسية -> اختيار نوع الحساب -> شاشة الدخول (Google + بريد) =====
+ export function openRolePick() {
+-  clearAuthForms(); setLoginBusy(false); showLoginError(''); showAltLogin(false); showScreen('screen-role-pick');
++  setLoginBusy(false); showLoginError(''); showAltLogin(false); showScreen('screen-role-pick');
+ }
+ export function openLogin(type) {
+   if (!INTENT_ROLES.includes(type)) { openRolePick(); return; }
+@@ -375,7 +312,7 @@
+   // صراحة هنا وإلا ممكن تفضل عالقة ظاهرة فوق شاشة الدخول بعد تسجيل الخروج.
+   const cd = document.getElementById('screen-cust-detail'); if (cd) cd.style.display = 'none';
+   // تنظيف حالة المستخدم السابق (تبديل حسابات Google): لا يبقى أي دور/حالة/مسودة من حساب سابق.
+-  clearAuthForms(); clearEntryIntent(); _lastAttempt = null; // الدور المختار القديم لا يبقى عالقًا بعد الخروج
++  clearEntryIntent(); _lastAttempt = null; // الدور المختار القديم لا يبقى عالقًا بعد الخروج
+   try { localStorage.removeItem('manayef_drv_draft'); } catch(e) {}
+   window.CUD = null; window.CU = null; window.uploadedDocs = {};
+   if (_cur && (_cur.state === 'pending' || _cur.state === 'settled') && !_cur.handled) markStale(_cur, 'cancelled'); // خروج أثناء طلب معلّق: نتيجته المتأخرة تُتجاهل
+@@ -397,7 +334,7 @@
+ 
+ // ===== AUTHENTICATION V2 — Role Selection (بعد Authentication دائمًا، لكل Provider) =====
+ // Provider Independence: الدالة دي هي المكان الوحيد في المشروع اللي بينشئ users/{uid} لأي
+-// مستخدم جديد (Email أو Google أو أي Provider مستقبلي) - الـ Gateway (main.js:onAuthStateChanged)
++// مستخدم جديد (Google) - الـ Gateway (main.js:onAuthStateChanged)
+ // بيقرا بس وبيوجّه هنا، وصفر Provider بيكتب حاجة بنفسه.
+ let _registrationInProgress = false; // Concurrency: يمنع Double-click/محاولات متزامنة من نفس الجلسة
+ export async function completeRegistration(role) {
+@@ -523,7 +460,7 @@
+ let _lastAttempt = null;
+ let _lastMethod = 'google'; // طريقة آخر دخول التقطه captureLoginIntent (لإعادة المحاولة) // لزر "إعادة المحاولة" بعد فشل قراءة الحساب - بنفس الدور المختار
+ export async function handleSignedIn(user, attempt = {}) {
+-  const intent = attempt.intent || null, fresh = !!attempt.fresh, method = attempt.method === 'email' ? 'email' : 'google';
++  const intent = attempt.intent || null, fresh = !!attempt.fresh, method = 'google';
+   window.CU = user; window.CUD = null; // لا لوحة تُفتح قبل ما الدور يتأكد
+   let data = null, exists = false, storeMissing = false;
+   try {
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/js/firebase.js proj/js/firebase.js
+--- orig/js/firebase.js	2026-10-13 04:27:06.000000000 +0000
++++ proj/js/firebase.js	2026-10-14 10:54:18.164010080 +0000
+@@ -1,7 +1,7 @@
+ // ===== Firebase Module =====
+ import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+ import { getFirestore, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+-import { getAuth, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
++import { getAuth, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+ 
+ // ===== CONFIG =====
+ const FC = {
+@@ -22,7 +22,7 @@
+ gProvider.setCustomParameters({ prompt: 'select_account' });
+ 
+ // ===== EXPORTS =====
+-export { db, auth, gProvider, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion, signOut, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail };
++export { db, auth, gProvider, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, limit, startAfter, deleteDoc, runTransaction, writeBatch, getCountFromServer, getAggregateFromServer, average, count, sum, arrayUnion, signOut, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult };
+ 
+ // ===== CLOUDINARY CONFIG =====
+ export const CLOUDINARY_CLOUD = 'yfohr6xd';
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/js/main.js proj/js/main.js
+--- orig/js/main.js	2026-10-13 04:27:06.000000000 +0000
++++ proj/js/main.js	2026-10-14 10:54:18.164962314 +0000
+@@ -13,7 +13,7 @@
+ import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
+ import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
+ import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
+-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, processAuthUser, isAuthOpActive, takeExpectedSignOut, emailLogin, emailSignup, emailReset, openSignup, openForgot, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
++import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, processAuthUser, isAuthOpActive, takeExpectedSignOut, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
+ import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
+ import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
+ import { renderIcons } from './icons.js';
+@@ -67,7 +67,7 @@
+   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
+   smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, loginGoogleRedirect, hideLoading,
+   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
+-  loginGoogle, emailLogin, emailSignup, emailReset, openSignup, openForgot, openRolePick, pickRole, openLogin, retryLoadAccount, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
++  loginGoogle, openRolePick, pickRole, openLogin, retryLoadAccount, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
+   syncToHubSpot, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
+   acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus,
+   sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer,
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/admin-authz.test.mjs proj/tests/admin-authz.test.mjs
+--- orig/tests/admin-authz.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/admin-authz.test.mjs	2026-10-15 11:58:16.074608313 +0000
+@@ -6,15 +6,15 @@
+ import { S, sleep, fresh } from './boot/env.mjs';
+ import { activeScreens, el, fire, type, screenLog } from './boot/dom.mjs';
+ 
+-const PW = 'Passw0rd!x';
+ const ADMIN = { role: 'admin', status: 'active', name: 'Boss' };
+ const CUST = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
+ const drv = (status) => ({ role: 'driver', status, fullName: 'Drv', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } });
+ const mer = (status) => ({ role: 'merchant', status, name: 'M' });
+ const choose = (r) => { fire('home-start'); const c = [...document.querySelectorAll('.rp-card')].find((x) => x.attrs.onclick.includes(`'${r}'`)); new Function(c.attrs.onclick)(); };
+ const screen = () => activeScreens().join(',');
+-const login = async (role, email) => { choose(role); type('em-email', email); type('em-pass', PW); fire('em-form', 'submit'); await sleep(90); };
+-const acct = (email, uid, doc) => { S.accounts[email] = { uid, password: PW }; S.users[uid] = doc; };
++const ACC = {}; // الدخول الوحيد: Google (بريد الحساب يُربط بـuid فقط ليسهل قراءة الاختبارات)
++const login = async (role, email) => { choose(role); S.popupUser = { uid: ACC[email], email }; fire('lg-google'); await sleep(90); };
++const acct = (email, uid, doc) => { ACC[email] = uid; S.users[uid] = doc; };
+ const decisionWrites = () => S.writes.filter((w) => /^(users|stores|notifications)\//.test(w.path));
+ const reject = async (fn, uid, reason = 'سبب تجريبي') => { window[fn](uid); type('reason-text', reason); window.confirmReasonModal(); await sleep(60); };
+ beforeEach(async () => { await fresh(); acct('a@x.com', 'uA', ADMIN); acct('c@x.com', 'uC', CUST); });
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/admin-client-rules.test.mjs proj/tests/admin-client-rules.test.mjs
+--- orig/tests/admin-client-rules.test.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/admin-client-rules.test.mjs	2026-10-15 22:25:07.224801800 +0000
+@@ -0,0 +1,59 @@
++// node --test tests/admin-client-rules.test.mjs
++// يربط كود الإدارة الحقيقي (js/admin.js) بقواعد firestore.rules عبر المفسّر المحلي: نشغّل admAccDrv/admRejDrv/admAccStore/admRejStore فعليًا (Firebase مُحاكى)،
++// نلتقط الكتابات التي يرسلها العميل، ثم نعيد تنفيذها نفسها كأدمن حقيقي على القواعد (مفسّر محلي، ليس Emulator Google) ونتأكد أنها تُقبل، وأن أي تعديل ضار عليها يُرفض.
++// الغاية: كشف أي عدم توافق بين حمولة العميل وشروط القواعد (approvedBy/approvedAt/serverTimestamp/المتجر الذرّي).
++import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict'; import fs from 'node:fs';
++import { S, sleep, fresh } from './boot/env.mjs';
++import { fire, type, activeScreens } from './boot/dom.mjs';
++import { initializeTestEnvironment, assertFails, assertSucceeds, doc, setDoc, getDoc, runTransaction, addDoc, collection, serverTimestamp } from './rules-sim/shim.mjs';
++
++const RULES = fs.readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8');
++const ADMIN = { role: 'admin', status: 'active', name: 'Boss' };
++const drv = (status) => ({ role: 'driver', status, fullName: 'Drv', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } });
++const mer = (status) => ({ role: 'merchant', status, storeName: 'M' });
++const choose = (r) => { fire('home-start'); const c = [...document.querySelectorAll('.rp-card')].find((x) => x.attrs.onclick.includes(`'${r}'`)); new Function(c.attrs.onclick)(); };
++const unTS = (v) => (v === 'TS' ? serverTimestamp() : Array.isArray(v) ? v.map(unTS) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unTS(x)])) : v);
++beforeEach(async () => { await fresh(); });
++
++async function runApp(seed, act) { // يشغّل واجهة الإدارة الحقيقية ويرجع ما كتبته
++  S.users.uA = ADMIN; S.users.uD = drv('pending'); S.users.uM = mer('pending'); S.stores.uM = { status: 'pending', storeName: 'M' };
++  choose('customer'); S.popupUser = { uid: 'uA', email: 'a@x.com' }; fire('lg-google'); await sleep(90); assert.equal(activeScreens().join(','), 'screen-admin');
++  S.writes.length = 0; await act(); await sleep(60); return S.writes.map((w) => ({ ...w, data: unTS(w.data) }));
++}
++async function rulesEnv() {
++  const env = await initializeTestEnvironment({ firestore: { rules: RULES } });
++  await env.withSecurityRulesDisabled(async (c) => { const d = c.firestore(); await setDoc(doc(d, 'users', 'uA'), ADMIN); await setDoc(doc(d, 'users', 'uD'), drv('pending')); await setDoc(doc(d, 'users', 'uM'), mer('pending')); await setDoc(doc(d, 'stores', 'uM'), { status: 'pending', storeName: 'M' }); });
++  return env;
++}
++const replay = (db, writes) => runTransaction(db, async (tx) => { for (const w of writes.filter((x) => !x.add)) { const [c, id] = w.path.split('/'); const ref = id === 'new' ? doc(collection(db, c)) : doc(db, c, id); if (w.update) tx.update(ref, w.data); else tx.set(ref, w.data); } });
++const dumpUser = async (env, id) => env.withSecurityRulesDisabled(async (c) => (await getDoc(doc(c.firestore(), 'users', id))).data());
++
++test('AR1. اعتماد كابتن من واجهة الإدارة الحقيقية: الكتابات تُقبل في القواعد وتنتج active مع approvedBy الأدمن', async () => {
++  const w = await runApp(null, () => window.admAccDrv('uD')); assert.ok(w.some((x) => x.path === 'users/uD' && x.data.status === 'active')); assert.ok(w.some((x) => x.path.startsWith('notifications/')));
++  const env = await rulesEnv(); await assertSucceeds(replay(env.authenticatedContext('uA').firestore(), w)); const u = await dumpUser(env, 'uD'); assert.equal(u.status, 'active'); assert.equal(u.approvedBy, 'uA'); assert.equal(u.role, 'driver');
++});
++test('AR2. رفض كابتن بسبب: نفس الشيء مع rejectedBy/rejectReason', async () => {
++  const w = await runApp(null, async () => { window.admRejDrv('uD'); type('reason-text', 'الرخصة منتهية'); window.confirmReasonModal(); });
++  const env = await rulesEnv(); await assertSucceeds(replay(env.authenticatedContext('uA').firestore(), w)); const u = await dumpUser(env, 'uD'); assert.equal(u.status, 'rejected'); assert.equal(u.rejectedBy, 'uA'); assert.equal(u.rejectReason, 'الرخصة منتهية');
++});
++test('AR3. اعتماد تاجر ورفضه: users+stores في معاملة واحدة تُقبل بالقواعد (الاتساق الذرّي)', async () => {
++  const w = await runApp(null, () => window.admAccStore('uM')); assert.ok(w.some((x) => x.path === 'stores/uM' && x.data.status === 'active'));
++  const env = await rulesEnv(); await assertSucceeds(replay(env.authenticatedContext('uA').firestore(), w)); assert.equal((await dumpUser(env, 'uM')).status, 'active');
++  await fresh(); const w2 = await runApp(null, async () => { window.admRejStore('uM'); type('reason-text', 'بيانات ناقصة'); window.confirmReasonModal(); });
++  const env2 = await rulesEnv(); await assertSucceeds(replay(env2.authenticatedContext('uA').firestore(), w2)); assert.equal((await dumpUser(env2, 'uM')).status, 'rejected');
++});
++test('AR4. سجل التدقيق الذي يكتبه التطبيق يُقبل (adminId=uid، createdAt=serverTimestamp، حقول محددة)', async () => {
++  await runApp(null, () => window.admAccDrv('uD')); const audit = S.writes.find((x) => x.path === 'auditLog/new'); assert.ok(audit, 'يُكتب سجل تدقيق'); const env = await rulesEnv();
++  await assertSucceeds(addDoc(collection(env.authenticatedContext('uA').firestore(), 'auditLog'), unTS(audit.data)));
++  await assertFails(addDoc(collection(env.authenticatedContext('uA').firestore(), 'auditLog'), { ...unTS(audit.data), adminId: 'someoneElse' })); // انتحال
++});
++test('AR5. نفس كتابات العميل بعد تعديلها ضارًّا تُرفض: هوية معتمِد مزوّرة، متجر منفصل، حالة خاطئة، وقت من العميل', async () => {
++  const w = await runApp(null, () => window.admAccStore('uM')); const env = await rulesEnv(); const db = () => env.authenticatedContext('uA').firestore();
++  const tamper = (f) => w.map((x) => f({ ...x, data: { ...x.data } }));
++  await assertFails(replay(db(), tamper((x) => { if (x.path === 'users/uM') x.data.approvedBy = 'forged'; return x; })));
++  await assertFails(replay(db(), tamper((x) => { if (x.path === 'users/uM') x.data.approvedAt = new Date(0).getTime(); return x; })));
++  await assertFails(replay(db(), w.filter((x) => x.path !== 'stores/uM'))); // بلا تحديث المتجر
++  await assertFails(replay(db(), tamper((x) => { if (x.path === 'stores/uM') x.data.status = 'rejected'; return x; })));
++  await assertFails(replay(db(), tamper((x) => { if (x.path === 'users/uM') delete x.data.approvedBy; return x; })));
++  assert.equal((await dumpUser(env, 'uM')).status, 'pending'); // لا شيء تسرّب
++});
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/auth-contract.test.mjs proj/tests/auth-contract.test.mjs
+--- orig/tests/auth-contract.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/auth-contract.test.mjs	2026-10-14 21:15:32.087431035 +0000
+@@ -7,28 +7,22 @@
+   assert.match(html, /<title>MATLABK/); assert.match(R('js/main.js'), /name:'MATLABK'/);
+   for (const f of ['js/admin.js', 'js/external.js', 'js/notifications.js', 'js/orders.js']) assert.doesNotMatch(R(f), /['"`][^'"`\n]*(MOVA|موزا)[^'"`\n]*['"`]/);
+ });
+-test('auth providers: Google + email/password only; legacy email-link/OTP/linking code stays forbidden; email-password SDK calls live only in auth.js + firebase.js', () => {
+-  const FORBIDDEN = ['sendSignInLinkToEmail', 'signInWithEmailLink', 'isSignInWithEmailLink',
++test('Google-only authentication: no email/password, email-link, OTP, linking or legacy provider code anywhere (comments stripped)', () => {
++  const FORBIDDEN = ['createUserWithEmailAndPassword', 'signInWithEmailAndPassword', 'sendPasswordResetEmail', 'sendSignInLinkToEmail', 'signInWithEmailLink', 'isSignInWithEmailLink',
+     'EmailAuthProvider', 'linkWithCredential', 'linkWithRedirect', 'linkWithPopup', 'fetchSignInMethodsForEmail', 'emailForSignIn', 'doLogin', 'doRegister', 'showForgot', 'showEmailOTP',
+-    'handleEmailAlreadyInUse', 'handleGoogleAccountConflict', 'maybeOfferPendingLink', 'mova_link_intent', 'LINK_INTENT', 'stashLinkIntent', 'readLinkIntent', 'clearLinkIntent', 'switchTab'];
++    'handleEmailAlreadyInUse', 'handleGoogleAccountConflict', 'maybeOfferPendingLink', 'mova_link_intent', 'LINK_INTENT', 'stashLinkIntent', 'readLinkIntent', 'clearLinkIntent', 'switchTab',
++    'emailLogin', 'emailSignup', 'emailReset', 'openSignup', 'openForgot', 'validateEmailLogin', 'validateSignup', 'RESET_SENT', 'updatePassword', 'confirmPasswordReset', 'verifyPasswordResetCode'];
+   const files = ['index.html', ...fs.readdirSync(new URL('../js/', import.meta.url)).map((f) => 'js/' + f), 'functions/index.js', 'functions/lib/dispatch-core.js'];
+   for (const f of files) { const s = strip(R(f).replace(/<!--[\s\S]*?-->/g, '')); for (const w of FORBIDDEN) assert.ok(!s.includes(w), `${f} still references ${w}`); }
+-});
+-test('email/password SDK calls are confined to auth.js (+ firebase.js re-export); no passwords in storage/logs', () => {
+-  const ALLOWED = new Set(['firebase.js', 'auth.js']);
+-  for (const f of fs.readdirSync(new URL('../js/', import.meta.url))) { const t = strip(R('js/' + f)); if (!ALLOWED.has(f)) for (const w of ['createUserWithEmailAndPassword', 'signInWithEmailAndPassword', 'sendPasswordResetEmail']) assert.ok(!t.includes(w), `${f} uses ${w}`); }
+-  const a = strip(R('js/auth.js'));
+-  assert.doesNotMatch(a, /(local|session)Storage\.setItem\([^)]*(pass|pwd|secret)/i);
+-  assert.doesNotMatch(a, /console\.(log|warn|error|info|debug)\([^)]*(password|em-pass|su-pass|\bpw\b)/i);
+-  assert.doesNotMatch(a, /(setDoc|updateDoc)\([^;]*password/i);
+-  assert.doesNotMatch(R('index.html'), /type="password"[^>]*value=|autocomplete="off"[^>]*type="password"/);
++  const html = R('index.html'); assert.doesNotMatch(html, /type="(password|email)"|<form\b|id="(em|su|fg)-|autocomplete="(current|new)-password"/); // لا حقول بريد/كلمة مرور ولا نماذج
++  assert.doesNotMatch(R('css/styles.css'), /\.em-|#screen-signup|#screen-forgot/); // لا CSS يتيم للمسارات المحذوفة
+ });
+ test('Google Auth: popup is the primary flow, redirect kept only as explicit fallback; getRedirectResult + onAuthStateChanged intact', () => {
+   const fb = R('js/firebase.js'); const imp = fb.match(/import \{([^}]*)\} from "https:\/\/www\.gstatic\.com\/firebasejs\/[\d.]+\/firebase-auth\.js"/)[1].split(',').map((x) => x.trim()).sort();
+-  assert.deepEqual(imp, ['GoogleAuthProvider', 'createUserWithEmailAndPassword', 'getAuth', 'getRedirectResult', 'onAuthStateChanged', 'sendPasswordResetEmail', 'signInWithEmailAndPassword', 'signInWithPopup', 'signInWithRedirect', 'signOut']); // Google + بريد/كلمة مرور فقط (لا email link ولا غيره)
++  assert.deepEqual(imp, ['GoogleAuthProvider', 'getAuth', 'getRedirectResult', 'onAuthStateChanged', 'signInWithPopup', 'signInWithRedirect', 'signOut']); // Google فقط: لا بريد ولا email link ولا غيره
+   assert.match(fb, /new GoogleAuthProvider\(\)/); assert.match(fb, /prompt: 'select_account'/);
+   const a = R('js/auth.js'); const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export async function loginGoogleRedirect()'));
+-  assert.match(lg, /await runCredentialOp\(att, \(\) => signInWithPopup\(auth, gProvider\), 'google'/);
++  assert.match(lg, /await runCredentialOp\(att, \(\) => signInWithPopup\(auth, gProvider\), 'popup sign-in'\)/);
+   // signInWithPopup لازم تكون أول await داخل الـ click handler (وإلا المتصفح يحجب النافذة)
+   assert.doesNotMatch(lg.slice(0, lg.indexOf('await runCredentialOp(')), /\bawait\b/); // runCredentialOp تستدعي op() متزامنًا قبل أول انتظار
+   assert.doesNotMatch(lg, /signInWithRedirect/);               // المسار الأساسي ما بيستخدمش redirect
+@@ -51,11 +45,11 @@
+   assert.match(lo, /await signOut\(auth\)/); assert.match(lo, /resetLoginState\(\)/); assert.match(lo, /clearRedirectPending\(\)/);
+   const lg = a.slice(a.indexOf('export async function loginGoogle('), a.indexOf('export async function loginGoogleRedirect()')); assert.doesNotMatch(lg, /window\.CU\s*=[^=]/);
+ });
+-test('3 stages: home (screen-entry) -> role pick -> login screen (Google + email form); no legacy UI', () => {
++test('3 stages: home (screen-entry) -> role pick -> login screen (Google only); no legacy UI', () => {
+   const html = R('index.html');
+   const home = html.slice(html.indexOf('id="screen-entry"'), html.indexOf('id="screen-role-pick"'));
+   const pick = html.slice(html.indexOf('id="screen-role-pick"'), html.indexOf('id="screen-login"'));
+-  const login = html.slice(html.indexOf('id="screen-login"'), html.indexOf('id="screen-signup"'));
++  const login = html.slice(html.indexOf('id="screen-login"'), html.indexOf('id="screen-role-select"'));
+   assert.doesNotMatch(home + pick, /type="(email|password)"/); // لا حقول بريد/كلمة مرور في الرئيسية أو اختيار النوع
+   assert.doesNotMatch(html, /auth-tab|lmail|lpass|login-btn|legacy-login|auth-register|id="screen-auth"|id="screen-otp"|otp-email|otp-card/i); assert.doesNotMatch(html, /id="[^"]*apple|onclick="[^"]*apple/i); // لا زر Apple
+   // 1) الصفحة الرئيسية: هوية + خدمات + زر بدء، ولا زر Google ولا اختيار دور هنا
+@@ -93,10 +87,7 @@
+   // 2) نفس المستخدم داخل بالفعل => نفس البوابة (قراءة طازجة)
+   const ac = a.slice(a.indexOf('async function afterCredential('), a.indexOf('let _busyWhich'));
+   assert.match(ac, /await handleSignedIn\(cred\.user, a\)/); assert.match(ac, /if \(att\.handled\) \{ retire\(att\); return; \}/); assert.match(ac, /discardStaleSession\(att, cred\.user\)/);
+-  // مسار البريد: نفس البوابة والدور محفوظ قبل أي طلب Firebase، ولا افتراض عميل
+-  const em = a.slice(a.indexOf('export async function emailLogin('), a.indexOf('export function openSignup'));
+-  for (const [fn, call] of [['emailLogin', 'signInWithEmailAndPassword('], ['emailSignup', 'createUserWithEmailAndPassword(']]) { const f = em.slice(em.indexOf('export async function ' + fn)); assert.ok(f.indexOf("startAttempt(role, 'email')") > 0 && f.indexOf("startAttempt(role, 'email')") < f.indexOf(call), fn); assert.match(f, /const role = _chosenRole\(\); if \(!role\) return;/); }
+-  assert.doesNotMatch(em, /: 'customer'|routeUser\(|window\.CUD\s*=[^=]|window\.CU\s*=[^=]/); // لا توجيه ولا تعيين مستخدم من مسار البريد: البوابة فقط
++  assert.doesNotMatch(a, /startAttempt\(role, 'email'\)|signInWithEmailAndPassword|createUserWithEmailAndPassword/); // لا مسار دخول غير Google
+   // 3) main.js: بوابة واحدة، والتقاط الدور قبل أي تصفير، ولا توجيه مباشر هناك
+   const m = R('js/main.js'); const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
+   assert.match(h, /await processAuthUser\(user\)/); assert.doesNotMatch(h, /routeUser\(\)|getDoc\(|handleSignedIn\(/);
+@@ -170,7 +161,7 @@
+   assert.match(rules, /isApprovedMerchant\(\)/);
+   const upd = rules.slice(rules.indexOf('match /users/{userId}'), rules.indexOf('match /stores/{storeId}'));
+   for (const bad of ["'approvedBy'", "'rejectedBy'", "'approvedAt'", "'rejectReason'", "'role'"]) {
+-    const m = upd.match(/hasOnly\(\[[^\]]*\]\)/g) || []; assert.ok(!m.some((x) => x.includes(bad)), 'self-update allow-list must not contain ' + bad);
++    const m = upd.match(/affectedKeys\(\)\.hasOnly\(\[[^\]]*\]\)/g) || []; assert.ok(!m.some((x) => x.includes(bad)), 'self-update allow-list must not contain ' + bad);
+   }
+ });
+ test('onboarding page: every screen id referenced by routing exists', () => {
+@@ -208,7 +199,7 @@
+ test('rules: user cannot write role or approval metadata via any self-update allow-list', () => {
+   const a = rules.indexOf('match /users/{userId}'); const blk = rules.slice(a, rules.indexOf('match /stores/{storeId}', a));
+   assert.match(blk, /request\.resource\.data\.role == resource\.data\.role/);
+-  for (const m of blk.matchAll(/hasOnly\(\[([^\]]*)\]\)/g)) assert.doesNotMatch(m[1], /'(role|approvedBy|approvedAt|rejectedBy|rejectedAt|rejectReason|rejectionReason|points|approvalStatus)'/);
++  for (const m of blk.matchAll(/affectedKeys\(\)\.hasOnly\(\[([^\]]*)\]\)/g)) assert.doesNotMatch(m[1], /'(role|approvedBy|approvedAt|rejectedBy|rejectedAt|rejectReason|rejectionReason|points|approvalStatus)'/);
+ });
+ test('branding: remaining "mova" tokens are only documented legacy identifiers', () => {
+   const allowed = ['mova_loc_perm_', 'mova-functions', 'mova/', 'MOVA Icon System', 'MOVA Design System', 'MOVA Phase 3', 'MOVA DESIGN SYSTEM'];
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/auth-e2e.test.mjs proj/tests/auth-e2e.test.mjs
+--- orig/tests/auth-e2e.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/auth-e2e.test.mjs	2026-10-15 03:16:09.970936006 +0000
+@@ -1,27 +1,28 @@
+ // node --test tests/auth-e2e.test.mjs
+-// تشغيل كامل للتطبيق (js/main.js + كل الموديولات الحقيقية + DOM مبني من index.html الحقيقي): الضغط يتم بتنفيذ معالجات onclick/onsubmit
++// تشغيل كامل للتطبيق (js/main.js + كل الموديولات الحقيقية + DOM مبني من index.html الحقيقي): الضغط يتم بتنفيذ معالجات onclick
+ // الفعلية. فقط Firebase (Auth/Firestore) محاكى بنموذج يتبع ترتيب أحداث الـ SDK (tests/boot/sdk.mjs). ليس اختبارًا على Firebase الحقيقي.
+ import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict';
+ import { A, S, sleep, fresh, errors, consoleErrors, loadError } from './boot/env.mjs';
+-import { activeScreens, el, fire, type, nativeSubmits, screenLog } from './boot/dom.mjs';
++import { activeScreens, el, fire, nativeSubmits, screenLog } from './boot/dom.mjs';
+ import fs from 'node:fs';
+ 
+-const PW = 'Passw0rd!x'; const CUST = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
++const CUST = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
+ const DRV = { role: 'driver', status: 'active', fullName: 'Drv', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } };
+ const MER = { role: 'merchant', status: 'active', name: 'M' };
+-const pick = (r) => { fire('home-start'); const c = [...document.querySelectorAll('.rp-card')].find((x) => x.attrs.onclick.includes(`'${r}'`)); fire.call(null, c.id || '__none__'); };
+ // البطاقات بلا id: ننفذ onclick الخاص بها كما يفعل المتصفح
+ const choose = (r) => { fire('home-start'); const c = [...document.querySelectorAll('.rp-card')].find((x) => x.attrs.onclick.includes(`'${r}'`)); new Function(c.attrs.onclick)(); };
+-const acct = (email, uid, doc) => { S.accounts[email] = { uid, password: PW }; if (doc) { S.users[uid] = doc; if (doc.role === 'merchant') S.stores[uid] = {}; } };
+-const emailLogin = async (email, pw = PW, wait = 60) => { type('em-email', email); type('em-pass', pw); fire('em-form', 'submit'); await sleep(wait); };
++// الدخول الوحيد: Google. acct يربط البريد بـuid ويزرع مستند المستخدم؛ loginAs يضغط زر Google الحقيقي (نافذة Google تنجح بذلك الحساب)
++const ACC = {};
++const acct = (email, uid, doc) => { ACC[email] = uid; if (doc) { S.users[uid] = doc; if (doc.role === 'merchant') S.stores[uid] = {}; } };
+ const google = async (user, wait = 80) => { S.popupUser = user; fire('lg-google'); await sleep(wait); };
++const loginAs = (email, wait = 80) => google({ uid: ACC[email] ?? 'uid-' + email, email }, wait);
+ const screen = () => activeScreens().join(',');
+-beforeEach(async () => { await fresh(); });
++beforeEach(async () => { await fresh(); for (const k of Object.keys(ACC)) delete ACC[k]; });
+ 
+ test('00. الإقلاع: لا خطأ تحميل، الصفحة الرئيسية ظاهرة، شاشة التحميل مخفية، مستمع Auth واحد فقط', async () => {
+   assert.equal(loadError, null); assert.equal(screen(), 'screen-entry'); assert.equal(el('loading').classes.has('hide'), true); assert.equal(S.listeners.length, 1); assert.deepEqual(errors, []);
+ });
+-test('00b. كل معالجات onclick/onsubmit في index.html تشير لدوال معرّفة على window (لا أزرار ميتة)', () => {
++test('00b. كل معالجات onclick في index.html تشير لدوال معرّفة على window (لا أزرار ميتة)', () => {
+   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8'); const SKIP = new Set(['event', 'if', 'return', 'location', 'preventDefault', 'stopPropagation']); const bad = new Set();
+   for (const m of html.matchAll(/\son([a-z]+)="([^"]*)"/g)) for (const c of m[2].matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) if (!SKIP.has(c[1]) && typeof globalThis[c[1]] !== 'function') bad.add(c[1]);
+   assert.deepEqual([...bad], []);
+@@ -35,7 +36,7 @@
+ });
+ test('02. Google فاشل: رسالة عربية ظاهرة داخل شاشة الدخول، الزر يعود، لا انتقال', async () => {
+   choose('customer');
+-  const cases = { 'auth/popup-closed-by-user': /إغلاق نافذة Google/, 'auth/unauthorized-domain': /من هذا الرابط/, 'auth/operation-not-allowed': /غير متاح/, 'auth/internal-error': /غير متوقع/, 'auth/network-request-failed': /الإنترنت/ };
++  const cases = { 'auth/popup-closed-by-user': /إغلاق نافذة Google/, 'auth/unauthorized-domain': /من هذا الرابط/, 'auth/operation-not-allowed': /غير متاح/, 'auth/internal-error': /غير متوقع/, 'auth/network-request-failed': /الإنترنت/, 'auth/requests-from-referer-https://matlabk.github.io-are-blocked.': /إعدادات الخدمة/ };
+   for (const [code, re] of Object.entries(cases)) { S.popupError = code; fire('lg-google'); await sleep(40); assert.match(el('err-msg').textContent, re, code); assert.equal(el('lg-google').disabled, false); assert.equal(screen(), 'screen-login'); }
+   S.popupError = 'auth/popup-blocked'; fire('lg-google'); await sleep(40); assert.equal(el('lg-alt').hidden, false); // مسار redirect البديل يُعرض صراحة
+ });
+@@ -44,112 +45,92 @@
+   window.DEBUG_ERRORS = true; fire('lg-google'); await sleep(40); assert.ok(el('err-msg').textContent.includes('[auth/internal-error]'));
+ });
+ 
+-// ---- 3,4: بريد ----
+-test('03. بريد وكلمة مرور صحيحان => لوحة العميل بلا رجوع للبداية ولا تكرار توجيه', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com');
+-  assert.equal(screen(), 'screen-customer'); assert.equal(nativeSubmits.length, 0); assert.equal(S.calls.filter((c) => c === 'getDoc users').length, 1);
+-  assert.equal(screenLog.slice(screenLog.lastIndexOf('screen-login') + 1).includes('screen-entry'), false); assert.equal(screenLog.filter((s) => s === 'screen-customer').length, 1);
+-});
+-test('04. كلمة مرور خاطئة: رسالة موحدة، تبقى شاشة الدخول، لا لوحة، الحقول والأزرار سليمة', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com', 'wrong-pw!');
+-  assert.match(el('err-msg').textContent, /غير صحيحة/); assert.equal(screen(), 'screen-login'); assert.equal(el('em-pass').value, ''); assert.equal(el('em-submit').disabled, false); assert.equal(S.calls.includes('getDoc users'), false);
++// ---- Google فقط: مسارات البريد القديمة غير موجودة ولا يمكن الوصول إليها باستدعاء مباشر ----
++test('03. شاشة الدخول فيها زر Google فقط: لا حقول بريد/كلمة مرور ولا نماذج ولا روابط تسجيل/استعادة', async () => {
++  choose('customer'); const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
++  assert.equal(screen(), 'screen-login'); assert.ok(el('lg-google')); assert.doesNotMatch(html, /type="(email|password)"|<form\b|id="(em|su|fg)-|openSignup|openForgot|emailLogin|emailSignup|emailReset/);
++  for (const id of ['em-form', 'em-email', 'em-pass', 'em-submit', 'em-forgot', 'em-signup', 'su-form', 'fg-form', 'screen-signup', 'screen-forgot']) assert.equal(el(id), undefined, id); // العناصر نفسها غير موجودة (لا إخفاء فقط)
++});
++test('04. استدعاء معالجات البريد القديمة مباشرة غير ممكن: غير معرّفة على window ولا تُنفَّذ أي طلبات Firebase', async () => {
++  choose('customer');
++  for (const fn of ['emailLogin', 'emailSignup', 'emailReset', 'openSignup', 'openForgot']) { assert.equal(typeof window[fn], 'undefined', fn); assert.throws(() => window[fn]('a@x.com'), TypeError, fn); }
++  for (const m of ['signInWithEmailAndPassword', 'createUserWithEmailAndPassword', 'sendPasswordResetEmail', 'sendSignInLinkToEmail', 'signInWithEmailLink']) assert.equal(typeof (A[m]), 'undefined', m);
++  assert.deepEqual(S.calls.filter((c) => /signIn|create|reset|emailLink/i.test(c)), []);
+ });
+ 
+-// ---- 5,6: إنشاء حساب ----
+-test('05. إنشاء حساب جديد (عميل/كابتن/تاجر): مستند واحد بالحالة الصحيحة ثم شاشة الاستكمال، بلا صلاحيات إدارية', async () => {
++// ---- 5,6: حساب جديد عبر Google ----
++test('05. حساب Google جديد (عميل/كابتن/تاجر): مستند واحد بالحالة الصحيحة ثم شاشة الاستكمال، بلا صلاحيات إدارية', async () => {
+   for (const [role, st, scr] of [['customer', 'active', 'screen-complete-customer'], ['driver', 'incomplete', 'screen-driver-register'], ['merchant', 'incomplete', 'screen-complete-merchant']]) {
+-    await fresh(); const em = role + '@x.com'; choose(role); fire('em-signup'); type('su-email', em); type('su-pass', PW); type('su-pass2', PW); fire('su-form', 'submit'); await sleep(80);
++    await fresh(); const em = role + '@x.com'; choose(role); await google({ uid: 'uid-' + em, email: em }, 100);
+     const w = S.writes.filter((x) => x.path === 'users/uid-' + em); assert.equal(w.length, 1, role); assert.equal(w[0].data.role, role); assert.equal(w[0].data.status, st); assert.equal('isAdmin' in w[0].data || 'approvedBy' in w[0].data, false); assert.equal(screen(), scr, role);
+   }
+ });
+-test('06. تسجيل بمدخلات غير صالحة/بريد مستخدم: رسائل واضحة داخل شاشة التسجيل بدون طلب شبكة (عدا المستخدم)', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); fire('em-signup'); const go = async (e, p, c) => { type('su-email', e); type('su-pass', p); type('su-pass2', c); fire('su-form', 'submit'); await sleep(40); return el('su-err').textContent; };
+-  assert.match(await go('bad', PW, PW), /صيغة البريد/); assert.match(await go('n@x.com', 'short', 'short'), /8 أحرف/); assert.match(await go('n@x.com', PW, PW + '1'), /غير متطابقتين/); assert.equal(S.calls.filter((c) => c === 'create').length, 0);
+-  assert.match(await go('a@x.com', PW, PW), /مسجّل بالفعل/); assert.equal(S.writes.length, 0); assert.equal(screen(), 'screen-signup'); assert.equal(el('su-submit').disabled, false);
+-});
+-test('06b. نجاح إنشاء حساب Firebase وفشل حفظ الملف: لا يُبتلع الخطأ، رسالة + إعادة محاولة، والإعادة تنجح بدون مستند مكرر', async () => {
+-  choose('driver'); fire('em-signup'); type('su-email', 'n@x.com'); type('su-pass', PW); type('su-pass2', PW); S.failWrite = true; fire('su-form', 'submit'); await sleep(80);
++test('06b. نجاح مصادقة Google وفشل حفظ الملف: لا يُبتلع الخطأ، رسالة + إعادة محاولة، والإعادة تنجح بدون مستند مكرر', async () => {
++  choose('driver'); S.failWrite = true; await google({ uid: 'uid-n@x.com', email: 'n@x.com' }, 100);
+   assert.equal(screen(), 'screen-login'); assert.match(el('lg-retry').hidden ? '' : el('err-msg').textContent, /تعذّر حفظ بياناته/); assert.ok(consoleErrors.some((x) => x.includes('permission-denied'))); assert.equal(S.users['uid-n@x.com'], undefined);
+   S.failWrite = false; fire('lg-retry'); await sleep(80);
+   assert.equal(screen(), 'screen-driver-register'); assert.equal(S.writes.filter((x) => x.path === 'users/uid-n@x.com').length, 1); assert.equal(S.users['uid-n@x.com'].role, 'driver'); assert.equal(S.users['uid-n@x.com'].status, 'incomplete');
+ });
+ 
+-// ---- 7,8: استعادة ----
+-test('07. استعادة كلمة المرور: رد محايد (مسجّل وغير مسجّل) ويبقى المستخدم في شاشة الاستعادة', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); fire('em-forgot'); assert.equal(screen(), 'screen-forgot');
+-  for (const e of ['a@x.com', 'nobody@x.com']) { type('fg-email', e); fire('fg-form', 'submit'); await sleep(40); assert.match(el('fg-ok').textContent, /إذا كان هذا البريد مسجّلًا/); assert.equal(el('fg-err').textContent, ''); assert.equal(screen(), 'screen-forgot'); }
+-  assert.equal(nativeSubmits.length, 0);
+-});
+-test('08. فشل الاستعادة: بريد غير صالح/محاولات كثيرة/انقطاع => رسالة مناسبة، بلا نجاح زائف', async () => {
+-  choose('customer'); fire('em-forgot'); type('fg-email', 'bad'); fire('fg-form', 'submit'); await sleep(20); assert.match(el('fg-err').textContent, /صيغة البريد/); assert.equal(S.calls.includes('reset'), false);
+-  type('fg-email', 'a@x.com'); S.resetError = 'auth/too-many-requests'; fire('fg-form', 'submit'); await sleep(40); assert.match(el('fg-err').textContent, /محاولات كثيرة/); assert.equal(el('fg-ok').textContent, '');
+-  S.resetError = 'auth/network-request-failed'; fire('fg-form', 'submit'); await sleep(40); assert.match(el('fg-err').textContent, /الإنترنت/);
+-});
+-
+-// ---- 9: لا إعادة تحميل غير مقصودة ----
+-test('09. إرسال النماذج لا يسبب إعادة تحميل حتى لو المعالج غير معرّف (كلمة المرور لا تظهر في الرابط)', async () => {
+-  choose('customer'); type('em-email', 'a@x.com'); type('em-pass', PW);
+-  for (const [form, fn] of [['em-form', 'emailLogin'], ['su-form', 'emailSignup'], ['fg-form', 'emailReset']]) { const keep = globalThis[fn]; delete globalThis[fn]; fire(form, 'submit'); globalThis[fn] = keep; }
+-  assert.deepEqual(nativeSubmits, []);
+-  const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8'); assert.match(html, /addEventListener\('submit'[\s\S]{0,160}classList\.contains\('em-form'\)[\s\S]{0,60}preventDefault\(\)/); // حارس يعمل حتى لو فشلت الوحدات
++// ---- 9: لا نماذج ولا إرسال أصلي ----
++test('09. لا نماذج HTML في الصفحة: لا إرسال أصلي ولا كلمة مرور ولا بريد في الرابط (بعد كل سيناريو دخول)', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await loginAs('a@x.com');
++  assert.deepEqual(nativeSubmits, []); const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8'); assert.doesNotMatch(html, /<form\b|onsubmit=/);
+ });
+ 
+ // ---- 10,11: لا رجوع للبداية / لا تكرار توجيه ----
+ test('10. مستمع "مفيش مستخدم" المتأخر بعد رفض الدور لا يرجّع المستخدم للرئيسية ولا يمسح الرسالة', async () => {
+-  acct('a@x.com', 'u1', CUST); S.listenerDelay = 40; choose('driver'); await emailLogin('a@x.com', PW, 250);
++  acct('a@x.com', 'u1', CUST); S.listenerDelay = 40; choose('driver'); await loginAs('a@x.com', 250);
+   assert.equal(screen(), 'screen-login'); assert.match(el('err-msg').textContent, /كحساب عميل/); assert.equal(S.signOuts, 1);
+ });
+ test('10b. حدث خروج غير متوقع أثناء الدخول لا يمسح الدور المختار: حساب عميل يختار "كابتن" يُرفض ولا يدخل لوحة العميل بصمت', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('driver'); S.netDelay = 40; type('em-email', 'a@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(5);
++  acct('a@x.com', 'u1', CUST); choose('driver'); S.netDelay = 40; S.popupUser = { uid: 'u1', email: 'a@x.com' }; fire('lg-google'); await sleep(5);
+   S.listeners.forEach((l) => l(null)); // null عشوائي أثناء العملية (خروج من تاب تاني مثلًا)
+   await sleep(250);
+   assert.equal(screenLog.includes('screen-customer'), false, screenLog.join('>')); assert.equal(screenLog.slice(screenLog.lastIndexOf('screen-login') + 1).includes('screen-entry'), false);
+   assert.match(el('err-msg').textContent, /كحساب عميل.*ككابتن/); assert.equal(S.signOuts, 1);
+ });
+-test('11. دخول واحد = قراءة users واحدة وتوجيه واحد، وكذلك استعادة جلسة', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com'); assert.equal(S.calls.filter((c) => c === 'getDoc users').length, 1);
++test('11. دخول واحد = قراءة users واحدة وتوجيه واحد', async () => {
++  acct('a@x.com', 'u1', CUST); choose('customer'); await loginAs('a@x.com'); assert.equal(S.calls.filter((c) => c === 'getDoc users').length, 1);
+   assert.equal(screenLog.filter((s) => s === 'screen-customer').length, 1);
+ });
+ 
+ // ---- 12,13: أدوار وحالات ----
+-test('12. اختلاط الأدوار عبر Google والبريد: كل التقاطعات مرفوضة بلا لوحة، وبالرسالة المناسبة لكل طريقة', async () => {
++test('12. اختلاط الأدوار عبر Google: كل التقاطعات الستة مرفوضة بلا لوحة وبالرسالة المناسبة', async () => {
+   const DOC = { customer: CUST, driver: DRV, merchant: MER }; const DASH = ['screen-customer', 'screen-driver', 'screen-merchant', 'screen-admin']; let n = 0;
+   for (const role of Object.keys(DOC)) for (const intent of Object.keys(DOC)) {
+     if (role === intent) continue;
+-    for (const via of ['google', 'email']) {
+-      await fresh(); acct('a@x.com', 'u1', DOC[role]); choose(intent);
+-      if (via === 'google') await google({ uid: 'u1', email: 'a@x.com' }); else await emailLogin('a@x.com');
+-      assert.equal(DASH.includes(screenLog.at(-1)) || screenLog.some((s) => DASH.includes(s)), false, `${role}->${intent} via ${via}: ${screenLog}`); assert.equal(S.signOuts, 1); assert.equal(S.writes.length, 0);
+-      assert.match(el('err-msg').textContent, new RegExp(via === 'google' ? 'ببريد Google آخر' : 'ببريد إلكتروني آخر')); n++;
+-    }
++    await fresh(); acct('a@x.com', 'u1', DOC[role]); choose(intent); await loginAs('a@x.com');
++    assert.equal(screenLog.some((s) => DASH.includes(s)), false, `${role}->${intent}: ${screenLog}`); assert.equal(S.signOuts, 1); assert.equal(S.writes.length, 0);
++    assert.match(el('err-msg').textContent, /ببريد Google آخر/); n++;
+   }
+-  assert.equal(n, 12);
++  assert.equal(n, 6);
+ });
+ test('13. الحالات: incomplete/pending/rejected/blocked/active تُوجَّه فعليًا ولا تُعامل كـ active', async () => {
+   const T = [[{ ...DRV, status: 'incomplete' }, 'driver', 'screen-driver-register'], [{ ...DRV, status: 'pending' }, 'driver', 'screen-driver-register'], [{ ...DRV, status: 'rejected' }, 'driver', 'screen-driver-register'], [DRV, 'driver', 'screen-driver'],
+     [{ ...MER, status: 'incomplete' }, 'merchant', 'screen-complete-merchant'], [{ ...MER, status: 'pending' }, 'merchant', 'screen-merchant-status'], [{ ...MER, status: 'rejected' }, 'merchant', 'screen-merchant-status'], [MER, 'merchant', 'screen-merchant'],
+     [{ ...CUST, status: 'blocked' }, 'customer', 'screen-blocked'], [{ ...CUST, phone: '' }, 'customer', 'screen-complete-customer'], [CUST, 'customer', 'screen-customer']];
+-  for (const [doc, role, scr] of T) { await fresh(); acct('a@x.com', 'u1', doc); choose(role); await emailLogin('a@x.com', PW, 90); assert.equal(screen(), scr, `${doc.role}/${doc.status}`); }
++  for (const [doc, role, scr] of T) { await fresh(); acct('a@x.com', 'u1', doc); choose(role); await loginAs('a@x.com', 90); assert.equal(screen(), scr, `${doc.role}/${doc.status}`); }
+ });
+ test('13b. دور مفقود أو غير معروف في Firestore => رفض بلا أي لوحة (لا افتراض عميل)', async () => {
+-  for (const bad of [{ status: 'active', name: 'x', phone: '01012345678' }, { role: 'weird', status: 'active' }]) { await fresh(); acct('a@x.com', 'u1', bad); choose('customer'); await emailLogin('a@x.com'); assert.notEqual(screen(), 'screen-customer'); assert.equal(S.signOuts, 1); assert.match(el('home-err').textContent + el('err-msg').textContent, /غير مكتملة أو غير صالحة/); }
++  for (const bad of [{ status: 'active', name: 'x', phone: '01012345678' }, { role: 'weird', status: 'active' }]) { await fresh(); acct('a@x.com', 'u1', bad); choose('customer'); await loginAs('a@x.com'); assert.notEqual(screen(), 'screen-customer'); assert.equal(S.signOuts, 1); assert.match(el('home-err').textContent + el('err-msg').textContent, /غير مكتملة أو غير صالحة/); }
+ });
+ 
+ // ---- 14: خروج ----
+ test('14. الخروج: جلسة منتهية، الرئيسية، لا اختيار عالق، ثم تسجيل دخول جديد يبدأ من اختيار النوع', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); await emailLogin('a@x.com'); assert.equal(screen(), 'screen-customer');
+-  await window.doLogout(); await sleep(30); assert.equal(screen(), 'screen-entry'); assert.equal(S.current, null); assert.equal(window.CU, null); assert.equal(window.selectedType, null); assert.equal(el('em-email').value, ''); assert.equal(el('em-pass').value, '');
++  acct('a@x.com', 'u1', CUST); choose('customer'); await loginAs('a@x.com'); assert.equal(screen(), 'screen-customer');
++  await window.doLogout(); await sleep(30); assert.equal(screen(), 'screen-entry'); assert.equal(S.current, null); assert.equal(window.CU, null); assert.equal(window.selectedType, null);
+   fire('home-start'); assert.equal(screen(), 'screen-role-pick'); // يبدأ من جديد باختيار النوع
+ });
+ 
+ // ---- مهلة العمليات المعلّقة + إعادة المحاولة بعد فشل القراءة ----
+-test('15. نافذة Google معلّقة: بعد المهلة تُفك الأزرار وتظهر رسالة (بدل تجمّد كل الأزرار)، ويمكن الدخول بالبريد بعدها', async () => {
++test('15. نافذة Google معلّقة: بعد المهلة يُفك الزر وتظهر رسالة (بدل التجمّد)، ويمكن المحاولة بعدها', async () => {
+   window.AUTH_OP_TIMEOUT_MS = 120; acct('a@x.com', 'u1', CUST); choose('customer'); S.popupHang = true; fire('lg-google'); await sleep(40);
+-  assert.equal(el('lg-google').disabled && el('em-submit').disabled, true); await sleep(200);
+-  assert.equal(el('lg-google').disabled || el('em-submit').disabled, false); assert.match(el('err-msg').textContent, /أطول من المعتاد/);
+-  await emailLogin('a@x.com'); assert.equal(screen(), 'screen-customer');
++  assert.equal(el('lg-google').disabled, true); await sleep(200);
++  assert.equal(el('lg-google').disabled, false); assert.match(el('err-msg').textContent, /أطول من المعتاد/);
++  S.popupHang = false; await loginAs('a@x.com'); assert.equal(screen(), 'screen-customer');
+ });
+ test('16. فشل قراءة users بعد نجاح المصادقة: رسالة + إعادة محاولة بنفس الدور، بلا لوحة', async () => {
+-  acct('a@x.com', 'u1', CUST); choose('customer'); S.failRead = true; await emailLogin('a@x.com'); assert.notEqual(screen(), 'screen-customer'); assert.match(el('err-msg').textContent, /إعادة المحاولة/); assert.equal(el('lg-retry').hidden, false);
++  acct('a@x.com', 'u1', CUST); choose('customer'); S.failRead = true; await loginAs('a@x.com'); assert.notEqual(screen(), 'screen-customer'); assert.match(el('err-msg').textContent, /إعادة المحاولة/); assert.equal(el('lg-retry').hidden, false);
+   S.failRead = false; fire('lg-retry'); await sleep(60); assert.equal(screen(), 'screen-customer');
+ });
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/auth-races.test.mjs proj/tests/auth-races.test.mjs
+--- orig/tests/auth-races.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/auth-races.test.mjs	2026-10-15 03:16:41.920921361 +0000
+@@ -2,10 +2,9 @@
+ // سباقات المصادقة: كل سيناريو حتمي (التحكم في توقيت اكتمال كل عملية Firebase يدويًا) ويفحص الحالة النهائية: الجلسة الفعلية، الشاشة/الدور،
+ // الدور المختار المتبقي، ورسالة المستخدم. Firebase محاكى (tests/boot/sdk.mjs) بترتيب أحداث يطابق معرفتي بالـ SDK؛ مش اختبار على Firebase الحقيقي.
+ import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict';
+-import { A, S, sleep, fresh, finishPopup, failPopup, finishEmail, failEmail } from './boot/env.mjs';
+-import { activeScreens, el, fire, type, screenLog } from './boot/dom.mjs';
++import { A, S, sleep, fresh, finishPopup, failPopup } from './boot/env.mjs';
++import { activeScreens, el, fire, screenLog } from './boot/dom.mjs';
+ 
+-const PW = 'Passw0rd!x';
+ const CUST = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
+ const DRV = { role: 'driver', status: 'active', fullName: 'Drv', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } };
+ const X = { uid: 'uX', email: 'x@x.com' }, Y = { uid: 'uY', email: 'y@x.com' };
+@@ -14,7 +13,7 @@
+ const DASH = ['screen-customer', 'screen-driver', 'screen-merchant', 'screen-admin'];
+ const ever = (...ids) => ids.some((i) => screenLog.includes(i));
+ const googleClick = async () => { fire('lg-google'); await sleep(10); };
+-beforeEach(async () => { await fresh(); S.users.uX = CUST; S.users.uY = DRV; S.accounts['y@x.com'] = { uid: 'uY', password: PW }; S.accounts['x@x.com'] = { uid: 'uX', password: PW }; window.AUTH_OP_TIMEOUT_MS = 80; });
++beforeEach(async () => { await fresh(); S.users.uX = CUST; S.users.uY = DRV; window.AUTH_OP_TIMEOUT_MS = 80; });
+ 
+ test('R1. A تنتهي مهلتها، ثم تبدأ B، ثم تكتمل A متأخرة: جلسة A تُتجاهل بدون لمس B، وB تكتمل بدورها (كابتن)', async () => {
+   S.holdPopups = true; choose('customer'); await googleClick(); await sleep(130);               // A (customer) انتهت مهلتها
+@@ -27,8 +26,8 @@
+   assert.equal(screen(), 'screen-driver'); assert.equal(S.current.uid, 'uY'); assert.equal(window.CU.uid, 'uY'); assert.equal(window.CUD.role, 'driver');
+ });
+ test('R2. محاولتان تكتملان بترتيب معكوس (B أولًا ثم A المتأخرة): لا جلسة يتيمة ولا لوحة، وحالة نظيفة برسالة', async () => {
+-  S.holdPopups = true; choose('customer'); await googleClick(); await sleep(130);
+-  S.holdPopups = false; S.holdEmail = false; choose('driver'); type('em-email', 'y@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(60); // B (بريد) تكتمل فورًا
++  S.holdPopups = true; choose('customer'); await googleClick(); await sleep(130);                    // A (عميل) انتهت مهلتها
++  choose('driver'); await googleClick(); await finishPopup(1, Y);                                   // B (كابتن) تكتمل أولًا
+   assert.equal(screen(), 'screen-driver'); const before = screenLog.length;
+   await finishPopup(0, X);                                                                          // A تكتمل متأخرة وتستبدل جلسة B في Firebase
+   assert.equal(S.current, null, 'الجلسة اليتيمة أُنهيت'); assert.equal(window.CU, null); assert.equal(window.CUD, null);
+@@ -49,15 +48,14 @@
+   assert.equal(screen(), 'screen-customer'); assert.equal(S.current.uid, 'uX'); assert.equal(S.signOuts, 0);
+ });
+ test('R5. جلسة سليمة قائمة ثم تُلغى نافذة Google: لا تسجيل خروج، والجلسة واللوحة كما هما', async () => {
+-  choose('customer'); type('em-email', 'x@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(60); assert.equal(screen(), 'screen-customer');
+-  S.holdPopups = true; const p = window.loginGoogle('customer'); await sleep(10); await failPopup(0, 'auth/popup-closed-by-user'); await p;
++  S.holdPopups = true; choose('customer'); await googleClick(); await finishPopup(0, X); assert.equal(screen(), 'screen-customer'); // جلسة سليمة عبر Google
++  const p = window.loginGoogle('customer'); await sleep(10); await failPopup(1, 'auth/popup-closed-by-user'); await p;
+   assert.equal(S.signOuts, 0); assert.equal(S.current.uid, 'uX'); assert.equal(window.CU.uid, 'uX'); assert.equal(window.CUD.role, 'customer'); assert.equal(screen(), 'screen-customer');
+ });
+ test('R5b. جلسة سليمة قائمة ثم تكتمل مصادقة متأخرة لنفس المستخدم من محاولة قديمة: الجلسة لا تُطرد', async () => {
+   S.holdPopups = true; choose('customer'); await googleClick(); await sleep(130);                    // A انتهت مهلتها
+-  S.holdPopups = false; choose('customer'); type('em-email', 'x@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(60); // B بالبريد: نفس الحساب X
+-  assert.equal(screen(), 'screen-customer');
+-  await finishPopup(0, X);                                                                           // A المتأخرة بنفس المستخدم (كانت جلسته موجودة بعد B)
++  choose('customer'); await googleClick(); await finishPopup(1, X); assert.equal(screen(), 'screen-customer'); // B: نفس الحساب X تكتمل
++  await finishPopup(0, X);                                                                           // A المتأخرة بنفس المستخدم (جلسته موجودة بعد B)
+   assert.equal(screen(), 'screen-customer'); assert.equal(S.current.uid, 'uX');
+ });
+ test('R6. تعارض دور مع وصول أحداث المصادقة متأخرة (قبل/بعد وعد الدالة وبعد signOut): الرسالة والشاشة تبقيان، بلا لوحة وبلا جلسة', async () => {
+@@ -68,18 +66,16 @@
+   // حدث "لا مستخدم" إضافي بعد الرفض (مثلًا من تاب آخر): قد ينقل للرئيسية لكن الرسالة لا تضيع ولا تُفتح لوحة
+   S.listeners.forEach((l) => l(null)); await sleep(80); assert.match(el('home-err').textContent, /كحساب عميل.*ككابتن/); assert.equal(ever(...DASH), false);
+ });
+-test('R7. نجاح إنشاء حساب Firebase وفشل حفظ ملف المستخدم: لا لوحة، لا مستند، رسالة + إعادة محاولة، والإعادة تنجح مرة واحدة', async () => {
+-  choose('driver'); fire('em-signup'); type('su-email', 'n@x.com'); type('su-pass', PW); type('su-pass2', PW); S.failWrite = true; fire('su-form', 'submit'); await sleep(80);
++test('R7. نجاح مصادقة Google وفشل حفظ ملف المستخدم: لا لوحة، لا مستند، رسالة + إعادة محاولة، والإعادة تنجح مرة واحدة', async () => {
++  const N = { uid: 'uid-n@x.com', email: 'n@x.com' }; S.holdPopups = true; choose('driver'); S.failWrite = true; await googleClick(); await finishPopup(0, N); await sleep(60);
+   assert.equal(S.current.uid, 'uid-n@x.com'); assert.equal(S.users['uid-n@x.com'], undefined); assert.equal(ever(...DASH), false); assert.equal(screen(), 'screen-login'); assert.equal(el('lg-retry').hidden, false);
+   S.failWrite = false; fire('lg-retry'); await sleep(80);
+   assert.equal(screen(), 'screen-driver-register'); assert.equal(S.writes.filter((w) => w.path === 'users/uid-n@x.com').length, 1); assert.equal(S.users['uid-n@x.com'].role, 'driver'); assert.equal(S.users['uid-n@x.com'].status, 'incomplete');
+ });
+-test('R8. إعادة محاولة بعد تسجيل ناقص (بدون زر الإعادة): إنشاء بنفس البريد يفشل برسالة، والدخول بنفس البيانات يُكمل الملف مرة واحدة بالدور المختار', async () => {
+-  choose('driver'); fire('em-signup'); type('su-email', 'n@x.com'); type('su-pass', PW); type('su-pass2', PW); S.failWrite = true; fire('su-form', 'submit'); await sleep(80);
+-  S.failWrite = false; await window.doLogout(); await sleep(20); S.users['uid-n@x.com'] = undefined; delete S.users['uid-n@x.com'];
+-  choose('driver'); fire('em-signup'); type('su-email', 'n@x.com'); type('su-pass', PW); type('su-pass2', PW); fire('su-form', 'submit'); await sleep(60);
+-  assert.match(el('su-err').textContent, /مسجّل بالفعل/); assert.equal(S.writes.length, 0);
+-  fire('su-back'); type('em-email', 'n@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(80);
++test('R8. إعادة محاولة بعد تسجيل ناقص (بخروج ودخول جديد بدل زر الإعادة): الدخول التالي يُكمل الملف مرة واحدة بالدور المختار', async () => {
++  const N = { uid: 'uid-n@x.com', email: 'n@x.com' }; S.holdPopups = true; choose('driver'); S.failWrite = true; await googleClick(); await finishPopup(0, N); await sleep(60);
++  assert.equal(S.users['uid-n@x.com'], undefined); S.failWrite = false; await window.doLogout(); await sleep(20);
++  choose('driver'); await googleClick(); await finishPopup(1, N); await sleep(80);
+   assert.equal(screen(), 'screen-driver-register'); assert.equal(S.writes.filter((w) => w.path === 'users/uid-n@x.com').length, 1); assert.equal(S.users['uid-n@x.com'].role, 'driver');
+ });
+ test('R9. تسجيل الخروج أثناء طلب معلّق ثم اكتماله متأخرًا: لا لوحة، لا جلسة، ولا تغيير للدور (الترتيبان)', async () => {
+@@ -90,13 +86,13 @@
+     assert.equal(ever(...DASH), false, order + ': ' + screenLog.join('>')); assert.equal(S.current, null, order); assert.equal(window.CU, null); assert.equal(screen(), 'screen-entry'); assert.match(el('home-err').textContent, /تم تجاهل محاولة دخول سابقة/);
+   }
+ });
+-test('R10. تنظيف قديم (فشل متأخر لمحاولة بريد انتهت مهلتها) بعد بدء محاولة Google أحدث: لا يلمس دورها ولا حالتها', async () => {
+-  S.holdEmail = true; choose('customer'); type('em-email', 'x@x.com'); type('em-pass', PW); fire('em-form', 'submit'); await sleep(10); await sleep(130);   // A بريد، انتهت مهلتها
+-  assert.equal(el('em-submit').disabled, false);
+-  S.holdPopups = true; choose('driver'); await googleClick();                                       // B: Google بدور كابتن
+-  await failEmail(0, 'auth/network-request-failed');                                                // فشل A المتأخر (كان سيمسح دور B ويفك قفلها)
++test('R10. تنظيف قديم (فشل متأخر لمحاولة Google انتهت مهلتها) بعد بدء محاولة أحدث: لا يلمس دورها ولا حالتها', async () => {
++  S.holdPopups = true; choose('customer'); await googleClick(); await sleep(130);                    // A (عميل) انتهت مهلتها
++  assert.equal(el('lg-google').disabled, false);
++  choose('driver'); await googleClick();                                                            // B: Google بدور كابتن
++  await failPopup(0, 'auth/network-request-failed');                                                // فشل A المتأخر (كان سيمسح دور B ويفك قفلها)
+   assert.equal(el('lg-google').disabled, true); assert.equal(A.peekEntryType(), 'driver'); assert.equal(el('err-msg').textContent.includes('الإنترنت'), false, 'رسالة A لا تظهر على B');
+-  await finishPopup(0, X);                                                                           // B تكتمل بحساب عميل: لازم تُرفض (دور B كابتن)، لا لوحة عميل بصمت
++  await finishPopup(1, X);                                                                           // B تكتمل بحساب عميل: لازم تُرفض (دور B كابتن)، لا لوحة عميل بصمت
+   assert.equal(ever(...DASH), false); assert.equal(S.signOuts, 1); assert.match(el('err-msg').textContent, /كحساب عميل.*ككابتن/);
+ });
+ test('R11. ضغط مزدوج أثناء عملية معلّقة لا ينشئ محاولتين متداخلتين', async () => {
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/boot/env.mjs proj/tests/boot/env.mjs
+--- orig/tests/boot/env.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/boot/env.mjs	2026-10-15 11:59:33.362298736 +0000
+@@ -14,7 +14,7 @@
+ export const errors = []; process.on('unhandledRejection', (e) => errors.push('unhandledRejection: ' + (e && (e.stack || e.message || e))));
+ const realErr = console.error; export const consoleErrors = []; console.error = (...a) => { consoleErrors.push(a.map(String).join(' ')); };
+ export { S, resetSdk, startAuth, sleep };
+-export { finishPopup, failPopup, finishEmail, failEmail } from './sdk.mjs';
++export { finishPopup, failPopup } from './sdk.mjs';
+ const _A = await import('../../js/auth.js'); export const A = _A; // dynamic: لازم بعد register() الخاص بالـ loader
+ import { resetSdkData } from './sdk.mjs'; import { resetDom as _resetDom } from './dom.mjs';
+ // يرجّع التطبيق لحالة "زائر جديد على الصفحة الرئيسية" بين الاختبارات (بدون إعادة إقلاع)
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/boot/loader.mjs proj/tests/boot/loader.mjs
+--- orig/tests/boot/loader.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/boot/loader.mjs	2026-10-15 12:00:14.959765476 +0000
+@@ -9,7 +9,7 @@
+     const mod = decodeURIComponent(url.split('?m=')[1]);
+     const names = { 'firebase-app.js': ['initializeApp'],
+       'firebase-firestore.js': ['getFirestore','collection','doc','addDoc','getDoc','getDocs','setDoc','updateDoc','onSnapshot','query','where','orderBy','serverTimestamp','limit','startAfter','deleteDoc','runTransaction','writeBatch','getCountFromServer','increment','arrayUnion','Timestamp','GeoPoint','documentId','endBefore','limitToLast','getAggregateFromServer','sum','count','average','deleteField','arrayRemove','initializeFirestore','persistentLocalCache','enableIndexedDbPersistence','connectFirestoreEmulator','collectionGroup','getDocFromServer','getDocsFromServer','or','and','startAt','endAt','FieldValue','FieldPath','Bytes'],
+-      'firebase-auth.js': ['getAuth','signOut','onAuthStateChanged','GoogleAuthProvider','signInWithPopup','signInWithRedirect','getRedirectResult','signInWithEmailAndPassword','createUserWithEmailAndPassword','sendPasswordResetEmail'] }[mod] || [];
++      'firebase-auth.js': ['getAuth','signOut','onAuthStateChanged','GoogleAuthProvider','signInWithPopup','signInWithRedirect','getRedirectResult'] }[mod] || [];
+     const src = names.map((n) => `export const ${n} = (...a) => globalThis.__sdk[${JSON.stringify(n)}](...a);`).join('\n').replace(/export const GoogleAuthProvider = .*/, 'export class GoogleAuthProvider { setCustomParameters(){} }');
+     return { format: 'module', source: src, shortCircuit: true };
+   }
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/boot/sdk.mjs proj/tests/boot/sdk.mjs
+--- orig/tests/boot/sdk.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/boot/sdk.mjs	2026-10-15 11:59:33.361888526 +0000
+@@ -1,11 +1,11 @@
+ // محاكاة Firebase Auth + Firestore تتبع ترتيب الأحداث الحقيقي: المستمعون يُستدعون بشكل غير متزامن (microtask) بعد تغيّر المستخدم،
+ // وقبل أن يُحلّ وعد signOut/signIn (كما في SDK). تأخير الشبكة قابل للضبط. لا تقول شيئًا عن سلوك خوادم Firebase الفعلية.
+-export const S = { autoId: 0, users: {}, stores: {}, accounts: {}, current: null, listeners: [], initialized: false, lastUid: undefined, initDelay: 5, redirectDelay: 5, netDelay: 2, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), resetError: null, signOuts: 0, listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', holdPopups: false, held: [], holdEmail: false, heldEmail: [] };
++export const S = { autoId: 0, users: {}, stores: {}, current: null, listeners: [], initialized: false, lastUid: undefined, initDelay: 5, redirectDelay: 5, netDelay: 2, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), signOuts: 0, listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', holdPopups: false, held: [] };
+ const dispatch = (l, u) => (S.listenerDelay ? setTimeout(() => l(u), S.listenerDelay) : Promise.resolve().then(() => l(u)));
+ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+ const err = (code) => Object.assign(new Error(code), { code });
+ function notify() { if (!S.initialized) return; const uid = S.current?.uid ?? null; if (S.lastUid === uid) return; S.lastUid = uid; const u = S.current; for (const l of S.listeners) dispatch(l, u); }
+-export function resetSdk() { Object.assign(S, { holdPopups: false, held: [], holdEmail: false, heldEmail: [], listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', users: {}, stores: {}, accounts: {}, current: null, listeners: [], initialized: false, lastUid: undefined, initDelay: 5, redirectDelay: 5, netDelay: 2, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), resetError: null, signOuts: 0 }); }
++export function resetSdk() { Object.assign(S, { holdPopups: false, held: [], listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', users: {}, stores: {}, current: null, listeners: [], initialized: false, lastUid: undefined, initDelay: 5, redirectDelay: 5, netDelay: 2, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), signOuts: 0 }); }
+ const auth = { get currentUser() { return S.current; } };
+ const snap = (d) => ({ exists: () => d !== undefined, data: () => d, id: 'x' });
+ const tbl = (r) => (r.col === 'users' ? S.users : r.col === 'stores' ? S.stores : (S.other ||= {})[r.col] ||= {});
+@@ -27,15 +27,12 @@
+   signOut: async () => { S.signOuts++; S.current = null; notify(); await Promise.resolve(); },
+   signInWithPopup: async () => { S.calls.push('popup'); if (S.holdPopups) return new Promise((resolve, reject) => S.held.push({ resolve, reject })); if (S.popupHang) return new Promise(() => {}); await wait(S.netDelay); if (S.popupError) throw err(S.popupError); if (!S.popupUser) throw err('auth/popup-closed-by-user'); S.current = S.popupUser; notify(); await Promise.resolve(); return { user: S.current }; },
+   signInWithRedirect: async () => { S.calls.push('redirect'); },
+-  signInWithEmailAndPassword: async (_a, email, pw) => { S.calls.push('signIn'); if (S.holdEmail) return new Promise((resolve, reject) => S.heldEmail.push({ resolve, reject, email, pw })); await wait(S.netDelay); if (S.disabledProviders.has('password')) throw err('auth/operation-not-allowed'); const a = S.accounts[email]; if (!a || a.password !== pw) throw err('auth/invalid-credential'); S.current = { uid: a.uid, email }; notify(); await Promise.resolve(); return { user: S.current }; },
+-  createUserWithEmailAndPassword: async (_a, email, pw) => { S.calls.push('create'); await wait(S.netDelay); if (S.disabledProviders.has('password')) throw err('auth/operation-not-allowed'); if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw err('auth/invalid-email'); if (pw.length < 6) throw err('auth/weak-password'); if (S.accounts[email]) throw err('auth/email-already-in-use'); const a = { uid: 'uid-' + email, password: pw }; S.accounts[email] = a; S.current = { uid: a.uid, email }; notify(); await Promise.resolve(); return { user: S.current }; },
+-  sendPasswordResetEmail: async (_a, email) => { S.calls.push('reset'); await wait(S.netDelay); if (S.resetError) throw err(S.resetError); if (!S.accounts[email]) throw err('auth/user-not-found'); },
+ };
+ export function startAuth() { setTimeout(() => { S.initialized = true; S.lastUid = undefined; const u = S.current; S.lastUid = u?.uid ?? null; for (const l of S.listeners) Promise.resolve().then(() => l(u)); }, S.initDelay); }
+ export const sleep = wait;
+ 
+ // تصفير بيانات/إعدادات المحاكاة بين الاختبارات مع إبقاء مستمع التطبيق المسجّل (التطبيق يقلع مرة واحدة لكل ملف اختبار)
+-export function resetSdkData() { Object.assign(S, { users: {}, stores: {}, accounts: {}, current: null, lastUid: null, netDelay: 1, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), resetError: null, signOuts: 0, listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', holdPopups: false, held: [], holdEmail: false, heldEmail: [] }); }
++export function resetSdkData() { Object.assign(S, { users: {}, stores: {}, current: null, lastUid: null, netDelay: 1, popupUser: null, popupError: null, calls: [], writes: [], failRead: false, disabledProviders: new Set(), signOuts: 0, listenerDelay: 0, popupHang: false, failWrite: false, writeError: 'permission-denied', holdPopups: false, held: [] }); }
+ 
+ // ===== تحكم حتمي في اكتمال العمليات المعلّقة (لاختبارات السباقات) =====
+ // نجاح عملية معلّقة: order='listenerFirst' (الأحداث قبل وعد الدالة، وهو المعتاد) أو 'promiseFirst' (الوعد أولًا ثم الحدث).
+@@ -45,5 +42,3 @@
+ };
+ export const finishPopup = (i, user, order = 'listenerFirst') => settleOk(S.held[i], user, order);
+ export const failPopup = async (i, code) => { S.held[i].reject(Object.assign(new Error(code), { code })); await sleep(5); };
+-export const finishEmail = (i, order = 'listenerFirst') => { const h = S.heldEmail[i]; const a = S.accounts[h.email]; if (!a || a.password !== h.pw) return failEmail(i, 'auth/invalid-credential'); return settleOk(h, { uid: a.uid, email: h.email }, order); };
+-export const failEmail = async (i, code) => { S.heldEmail[i].reject(Object.assign(new Error(code), { code })); await sleep(5); };
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/email-auth.test.mjs proj/tests/email-auth.test.mjs
+--- orig/tests/email-auth.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/email-auth.test.mjs	1970-01-01 00:00:00.000000000 +0000
+@@ -1,182 +0,0 @@
+-// node --test tests/email-auth.test.mjs
+-// اختبارات سلوكية لمصادقة البريد/كلمة المرور فوق كود auth.js الحقيقي مع محاكاة Firebase والمتصفح.
+-// مش اختبار تكامل مع Firebase Auth الحقيقي (قواعد كلمة المرور/التحقق/الحماية من الإساءة تعمل في الخادم الفعلي فقط).
+-import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict';
+-import { A, $, T, reset, wireAuthListener, popupSucceeds, settle, DASHBOARDS, opened } from './helpers/env.mjs';
+-import { RESET_SENT, MSG_USER_LOAD_FAILED, validateSignup, validateEmailLogin, isValidEmail, describeAuthError } from '../js/auth-flow.js';
+-
+-const PW = 'Sup3r-Secret-Pass!';
+-const CUSTOMER = { role: 'customer', status: 'active', name: 'Ali', phone: '01012345678' };
+-const DRIVER_ACTIVE = { role: 'driver', status: 'active', fullName: 'D', phone: '01012345678', nationalId: '12345678901234', vehicleType: 'moto', docsSubmitted: true, docs: { id: 'x' } };
+-const BAD = 'البريد الإلكتروني أو كلمة المرور غير صحيحة. إذا كنت سجّلت سابقًا عبر Google فاستخدم زر Google.';
+-const fill = (id, v) => { $(id).value = v; };
+-const errText = (id = 'err-msg') => $(id).textContent;
+-let logs;
+-const realConsole = { warn: console.warn, error: console.error, log: console.log };
+-beforeEach(() => { const t = reset(); wireAuthListener(); logs = []; for (const k of ['warn', 'error', 'log']) console[k] = (...a) => { logs.push(a.map(String).join(' ')); }; });
+-import { afterEach } from 'node:test'; afterEach(() => { Object.assign(console, realConsole); });
+-
+-function account(email, uid, doc) { T().accounts[email] = { uid, password: PW }; if (doc) T().users[uid] = doc; }
+-async function doLogin(role, email, pw = PW) { A.openLogin(role); fill('em-email', email); fill('em-pass', pw); await A.emailLogin({ preventDefault() {} }); await settle(); }
+-async function doSignup(role, email, pw = PW, confirm = pw) { A.openLogin(role); A.openSignup(); fill('su-email', email); fill('su-pass', pw); fill('su-pass2', confirm); await A.emailSignup({ preventDefault() {} }); await settle(); }
+-
+-// ---------- تسجيل الدخول ----------
+-test('E1. بريد وكلمة مرور صحيحان لعميل => لوحة العميل بعد قراءة Firestore', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); await doLogin('customer', 'a@x.com');
+-  const t = T(); assert.equal(t.screens.at(-1), 'screen-customer'); assert.ok(t.calls.includes('loadCustomerData')); assert.equal(t.signOuts, 0); assert.ok(t.reads.includes('users/u1'));
+-});
+-test('E2. بيانات خاطئة (كلمة مرور / بريد غير مسجّل) => رسالة موحدة، لا لوحة، الدور المختار يُمسح، الحقول تُفرَّغ، الأزرار تعود', async () => {
+-  account('a@x.com', 'u1', CUSTOMER);
+-  for (const [email, pw] of [['a@x.com', 'wrong-pass'], ['nobody@x.com', PW]]) {
+-    await doLogin('customer', email, pw);
+-    assert.equal(errText(), BAD); assert.equal(opened(...DASHBOARDS), false); assert.equal($('em-pass').value, ''); assert.equal($('em-submit').disabled, false);
+-    assert.deepEqual(A.captureLoginIntent(), { action: 'handle', intent: null, fresh: false, method: 'google' }); assert.equal(T().reads.length, 0);
+-  }
+-});
+-test('E3. مدخلات ناقصة/غير صالحة تُرفض محليًا بدون أي طلب Firebase', async () => {
+-  A.openLogin('customer');
+-  for (const [e, p, re] of [['', PW, /صيغة البريد/], ['not-an-email', PW, /صيغة البريد/], ['a@x.com', '', /اكتب كلمة المرور/]]) { fill('em-email', e); fill('em-pass', p); await A.emailLogin(); assert.match(errText(), re); }
+-  assert.equal(T().emailCalls.length, 0);
+-});
+-test('E4. بدون نوع حساب مختار => لا طلب Firebase، رجوع لاختيار النوع (لا افتراض عميل)', async () => {
+-  fill('em-email', 'a@x.com'); fill('em-pass', PW); window.selectedType = null; await A.emailLogin();
+-  assert.equal(T().emailCalls.length, 0); assert.equal(T().screens.at(-1), 'screen-role-pick'); assert.match(errText(), /اختر نوع الحساب/);
+-  window.selectedType = 'admin'; await A.emailLogin(); assert.equal(T().emailCalls.length, 0); // admin ليس نوعًا قابلًا للاختيار
+-});
+-
+-// ---------- الأدوار والصلاحيات ----------
+-test('E5. تعارض أدوار بالبريد: كل التقاطعات الستة => لا لوحة، خروج، رسالة بالدور الفعلي + "ببريد إلكتروني آخر"', async () => {
+-  const ROLES = { customer: CUSTOMER, driver: DRIVER_ACTIVE, merchant: { role: 'merchant', status: 'active', name: 'M' } }; const LABEL = { customer: 'عميل', driver: 'كابتن', merchant: 'تاجر' }; const AS = { customer: 'كعميل', driver: 'ككابتن', merchant: 'كتاجر' };
+-  for (const role of Object.keys(ROLES)) for (const intent of Object.keys(ROLES)) {
+-    if (role === intent) continue; reset(); wireAuthListener(); account('a@x.com', 'u1', ROLES[role]); T().stores.u1 = {};
+-    await doLogin(intent, 'a@x.com');
+-    const t = T(); assert.equal(opened(...DASHBOARDS, 'screen-driver-register', 'screen-merchant-status', 'screen-complete-customer', 'screen-complete-merchant'), false, `${role}->${intent}: ${t.screens}`);
+-    assert.equal(t.signOuts, 1); assert.equal(t.writes.length, 0); assert.equal(window.CUD, null); assert.equal(t.screens.at(-1), 'screen-login');
+-    assert.equal(errText(), `هذا البريد الإلكتروني مسجّل بالفعل كحساب ${LABEL[role]}. لاستخدام MATLABK ${AS[intent]}، يُرجى تسجيل الدخول ببريد إلكتروني آخر.`);
+-  }
+-});
+-test('E6. نفس الدور + حالة pending/incomplete بالبريد => مسار الاستكمال/المراجعة، لا لوحة تشغيل', async () => {
+-  for (const [role, doc, screen] of [['driver', { role: 'driver', status: 'pending' }, 'screen-driver-register'], ['driver', { role: 'driver', status: 'incomplete' }, 'screen-driver-register'], ['merchant', { role: 'merchant', status: 'pending', name: 'M' }, 'screen-merchant-status']]) {
+-    reset(); wireAuthListener(); account('a@x.com', 'u1', doc); T().stores.u1 = {}; await doLogin(role, 'a@x.com');
+-    assert.equal(T().screens.at(-1), screen, doc.role + '/' + doc.status); assert.equal(opened('screen-driver', 'screen-merchant', 'screen-admin'), false); assert.equal(T().calls.includes('loadDriverData') || T().calls.includes('loadMerchantData'), false);
+-  }
+-});
+-test('E7. admin حقيقي: يدخل من زر العميل فقط؛ مرفوض كابتن/تاجر دون كشف وجود الإدارة؛ حقول ذاتية في مستند عميل لا تمنح admin', async () => {
+-  account('a@x.com', 'u1', { role: 'admin', status: 'active' }); await doLogin('customer', 'a@x.com'); assert.equal(T().screens.at(-1), 'screen-admin');
+-  for (const intent of ['driver', 'merchant']) { reset(); wireAuthListener(); account('a@x.com', 'u1', { role: 'admin', status: 'active' }); await doLogin(intent, 'a@x.com'); assert.equal(T().calls.includes('loadAdminData'), false); assert.ok(!/إدارة|admin/i.test(errText()), errText()); }
+-  reset(); wireAuthListener(); account('b@x.com', 'u2', { ...CUSTOMER, isAdmin: true, approved: true }); await doLogin('customer', 'b@x.com'); assert.equal(T().screens.at(-1), 'screen-customer'); assert.equal(T().calls.includes('loadAdminData'), false);
+-});
+-test('E8. دور مفقود/غير معروف لحساب بريد => رفض وخروج (fail-closed)', async () => {
+-  account('a@x.com', 'u1', { status: 'active', name: 'x', phone: '01012345678' }); await doLogin('customer', 'a@x.com');
+-  assert.equal(opened(...DASHBOARDS, 'screen-complete-customer'), false); assert.equal(T().signOuts, 1);
+-});
+-test('E9. فشل قراءة users/{uid} بعد نجاح المصادقة => رسالة + إعادة محاولة، لا لوحة؛ والإعادة تحتفظ بالدور المختار', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); T().failRead = true; await doLogin('driver', 'a@x.com');
+-  assert.equal(errText(), MSG_USER_LOAD_FAILED); assert.equal($('lg-retry').hidden, false); assert.equal(opened(...DASHBOARDS, 'screen-complete-customer'), false); assert.equal(window.CUD, null);
+-  T().failRead = false; T().screens.length = 0; await A.retryLoadAccount();
+-  assert.equal(opened(...DASHBOARDS), false); assert.equal(T().signOuts, 1); assert.match(errText(), /كحساب عميل.*ببريد إلكتروني آخر/); // الدور المختار (كابتن) احتُفظ به
+-});
+-
+-// ---------- إنشاء حساب ----------
+-test('E10. إنشاء حساب عميل: مستند واحد role=customer/status=active، بدون صلاحيات admin، ثم استكمال بيانات العميل', async () => {
+-  await doSignup('customer', 'new@x.com');
+-  const t = T(); const w = t.writes.filter((x) => x.path.startsWith('users/')); assert.equal(w.length, 1); assert.equal(w[0].path, 'users/uid-new@x.com');
+-  assert.equal(w[0].data.role, 'customer'); assert.equal(w[0].data.status, 'active'); assert.equal(w[0].data.email, 'new@x.com');
+-  for (const k of ['isAdmin', 'admin', 'approvedBy', 'approvedAt', 'rejectedBy']) assert.equal(k in w[0].data, false, k);
+-  assert.equal(t.screens.at(-1), 'screen-complete-customer'); assert.equal(opened(...DASHBOARDS), false);
+-});
+-test('E11. إنشاء حساب كابتن/تاجر: status=incomplete دائمًا + شاشة الاستكمال (لا موافقة ذاتية)', async () => {
+-  await doSignup('driver', 'd@x.com'); let w = T().writes.find((x) => x.path.startsWith('users/')); assert.equal(w.data.role, 'driver'); assert.equal(w.data.status, 'incomplete'); assert.equal(T().screens.at(-1), 'screen-driver-register');
+-  reset(); wireAuthListener(); await doSignup('merchant', 'm@x.com'); w = T().writes.find((x) => x.path.startsWith('users/')); assert.equal(w.data.role, 'merchant'); assert.equal(w.data.status, 'incomplete'); assert.equal(T().screens.at(-1), 'screen-complete-merchant');
+-  assert.equal(opened(...DASHBOARDS), false);
+-});
+-test('E12. مدخلات غير صالحة تُرفض محليًا: بريد خاطئ / كلمتان غير متطابقتين / قصيرة / طويلة', async () => {
+-  A.openLogin('customer'); A.openSignup();
+-  for (const [e, p, c, re] of [['bad', PW, PW, /صيغة البريد/], ['a@x.com', PW, PW + 'x', /غير متطابقتين/], ['a@x.com', 'short', 'short', /8 أحرف/], ['a@x.com', 'x'.repeat(129), 'x'.repeat(129), /طويلة/]]) {
+-    fill('su-email', e); fill('su-pass', p); fill('su-pass2', c); await A.emailSignup(); assert.match(errText('su-err'), re);
+-  }
+-  assert.equal(T().emailCalls.length, 0); assert.equal(T().writes.length, 0);
+-});
+-test('E13. بريد مسجّل بالفعل => رسالة واضحة، لا كتابة، لا مستند ثانٍ، ولا يتغير الدور', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); await doSignup('driver', 'a@x.com');
+-  assert.match(errText('su-err'), /مسجّل بالفعل/); assert.equal(T().writes.length, 0); assert.deepEqual(T().users.u1, CUSTOMER); assert.equal(Object.keys(T().users).length, 1); assert.equal(opened(...DASHBOARDS, 'screen-driver-register'), false);
+-  assert.equal($('su-submit').disabled, false);
+-});
+-test('E14. ضغط متكرر على إنشاء الحساب => طلب واحد، وحساب واحد، ومستند واحد', async () => {
+-  A.openLogin('customer'); A.openSignup(); fill('su-email', 'n@x.com'); fill('su-pass', PW); fill('su-pass2', PW);
+-  const p1 = A.emailSignup(); const p2 = A.emailSignup(); await Promise.all([p1, p2]); await settle();
+-  assert.equal(T().emailCalls.filter((c) => c.op === 'create').length, 1); assert.equal(T().writes.filter((x) => x.path.startsWith('users/')).length, 1);
+-});
+-test('E15. إنشاء حساب ثم تسجيل دخول بنفس البيانات: لا مستند مكرر', async () => {
+-  await doSignup('customer', 'n@x.com'); await A.doLogout(); T().writes.length = 0;
+-  await doLogin('customer', 'n@x.com'); assert.equal(T().writes.filter((x) => x.path.startsWith('users/')).length, 0); assert.equal(Object.keys(T().users).length, 1);
+-});
+-test('E16. انقطاع الاتصال / فشل الشبكة => رسائل عربية، بدون لوحة', async () => {
+-  A.openLogin('customer'); fill('em-email', 'a@x.com'); fill('em-pass', PW); T().netFail = true; await A.emailLogin(); assert.match(errText(), /الإنترنت|الاتصال/); assert.equal($('em-submit').disabled, false);
+-  T().netFail = false; const desc = Object.getOwnPropertyDescriptor(globalThis, 'navigator'); Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, configurable: true });
+-  try { T().emailCalls.length = 0; fill('em-pass', PW); await A.emailLogin(); assert.equal(T().emailCalls.length, 0); assert.match(errText(), /الإنترنت|الاتصال/); } finally { desc ? Object.defineProperty(globalThis, 'navigator', desc) : delete globalThis.navigator; }
+-});
+-
+-// ---------- استعادة كلمة المرور ----------
+-test('E17. استعادة كلمة المرور: نفس الرد المحايد لبريد مسجّل وغير مسجّل (لا كشف)', async () => {
+-  account('a@x.com', 'u1', CUSTOMER);
+-  for (const email of ['a@x.com', 'nobody@x.com']) { reset(); wireAuthListener(); account('a@x.com', 'u1', CUSTOMER); A.openLogin('customer'); A.openForgot(); fill('fg-email', email); await A.emailReset(); assert.equal($('fg-ok').textContent, RESET_SENT); assert.equal(errText('fg-err'), ''); assert.equal(T().emailCalls.at(-1).op, 'reset'); assert.equal($('fg-submit').disabled, false); }
+-});
+-test('E18. استعادة: بريد غير صالح لا يستدعي Firebase؛ أخطاء الشبكة/المحاولات الكثيرة برسائل عربية؛ الرسالة القديمة تُمسح', async () => {
+-  A.openLogin('customer'); A.openForgot(); fill('fg-email', 'bad'); await A.emailReset(); assert.match(errText('fg-err'), /صيغة البريد/); assert.equal(T().emailCalls.length, 0);
+-  fill('fg-email', 'a@x.com'); T().resetErr = 'auth/too-many-requests'; await A.emailReset(); assert.match(errText('fg-err'), /محاولات كثيرة/); assert.equal($('fg-ok').style.display, 'none');
+-  T().resetErr = null; T().netFail = true; await A.emailReset(); assert.match(errText('fg-err'), /الإنترنت|الاتصال/);
+-});
+-test('E19. استعادة كلمة المرور لا تنشئ جلسة ولا تفتح شاشة ولا تكتب بيانات', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); A.openLogin('customer'); A.openForgot(); fill('fg-email', 'a@x.com'); const before = T().screens.length; await A.emailReset();
+-  assert.equal(T().currentUser, null); assert.equal(T().screens.length, before); assert.equal(T().writes.length, 0); assert.equal(T().reads.length, 0);
+-});
+-
+-// ---------- الجلسة والخروج والتخزين ----------
+-test('E20. الخروج بعد دخول بالبريد: جلسة منتهية، صفحة رئيسية، حقول فارغة، لا اختيار عالق، وبيانات Firestore سليمة', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); await doLogin('customer', 'a@x.com'); fill('em-email', 'a@x.com'); fill('em-pass', PW); fill('su-pass', PW);
+-  await A.doLogout(); const t = T();
+-  assert.equal(t.currentUser, null); assert.equal(t.screens.at(-1), 'screen-entry'); assert.equal(window.CU, null); assert.equal(window.CUD, null);
+-  for (const id of ['em-email', 'em-pass', 'su-email', 'su-pass', 'su-pass2', 'fg-email']) assert.equal($(id).value, '', id);
+-  assert.deepEqual(A.captureLoginIntent(), { action: 'handle', intent: null, fresh: false, method: 'google' }); assert.deepEqual(t.users.u1, CUSTOMER); assert.equal(t.writes.length, 0);
+-});
+-test('E21. اختيار دور قديم لا يؤثر على جلسة بريد مستعادة لاحقًا', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); await doLogin('driver', 'a@x.com'); // رُفض
+-  T().screens.length = 0; T().currentUser = null; await (async () => { const { authStateChanged } = await import('./helpers/env.mjs'); await authStateChanged({ uid: 'u1', email: 'a@x.com' }); })();
+-  assert.equal(T().screens.at(-1), 'screen-customer');
+-});
+-test('E22. كلمة المرور لا تُخزَّن ولا تُسجَّل ولا تُكتب في Firestore (نجاح وفشل وإنشاء)', async () => {
+-  account('a@x.com', 'u1', CUSTOMER); await doLogin('customer', 'a@x.com'); await A.doLogout();
+-  await doLogin('customer', 'a@x.com', PW + 'x'); await doSignup('customer', 'z@x.com'); T().resetErr = 'auth/network-request-failed';
+-  const dump = JSON.stringify([T().writes, T().users, [...Array(sessionStorage.length ?? 0)]]) + JSON.stringify(logs);
+-  assert.equal(dump.includes(PW), false); for (const st of [sessionStorage, localStorage]) for (const k of ['matlabk_entry_type', 'matlabk_last_uid', 'matlabk_redirect_pending']) { const v = st.getItem(k); assert.ok(v === null || !v.includes(PW), k); }
+-  assert.equal($('em-pass').value, ''); assert.equal($('su-pass').value, ''); assert.equal($('su-pass2').value, '');
+-});
+-test('E23. عملية Google معلّقة تمنع بدء دخول بالبريد في نفس الوقت (قفل مشترك)، وGoogle يعمل بعد ذلك كما كان', async () => {
+-  const t = T(); let done; t.popup = () => new Promise((r) => { done = r; }); account('a@x.com', 'u1', CUSTOMER);
+-  A.openLogin('customer'); const g = A.loginGoogle(); fill('em-email', 'a@x.com'); fill('em-pass', PW); await A.emailLogin();
+-  assert.equal(t.emailCalls.length, 0); assert.equal($('em-submit').disabled, true);
+-  t.users.g1 = CUSTOMER; popupSucceeds({ uid: 'g1' }); done(await (async () => { t.currentUser = { uid: 'g1' }; return { user: t.currentUser }; })()); await g; A.resetLoginState(); A.clearEntryIntent();
+-  reset(); wireAuthListener(); T().users.g1 = CUSTOMER; A.openLogin('customer'); popupSucceeds({ uid: 'g1' }); await A.loginGoogle(); await settle(); assert.equal(T().screens.at(-1), 'screen-customer');
+-});
+-test('E24. رسالة التعارض لمسار Google بقيت كما هي ("ببريد Google آخر")', async () => {
+-  T().users.u1 = CUSTOMER; A.openLogin('driver'); popupSucceeds({ uid: 'u1' }); await A.loginGoogle(); await settle();
+-  assert.match(errText(), /ببريد Google آخر\.$/); assert.equal(opened(...DASHBOARDS), false);
+-});
+-
+-// ---------- منطق نقي ----------
+-test('E25. التحقق من المدخلات ورسائل أخطاء Firebase', () => {
+-  for (const ok of ['a@b.co', 'first.last+tag@sub.example.com', ' a@b.co ']) assert.equal(isValidEmail(ok), true, ok);
+-  for (const bad of ['', 'a', 'a@b', '@b.com', 'a b@c.com', 'a@b.c', null, undefined, 'x'.repeat(250) + '@b.com']) assert.equal(isValidEmail(bad), false, String(bad));
+-  assert.equal(validateSignup({ email: 'a@b.co', password: '12345678', confirm: '12345678' }).ok, true); assert.equal(validateEmailLogin({ email: 'a@b.co', password: 'x' }).ok, true);
+-  for (const code of ['auth/invalid-credential', 'auth/wrong-password', 'auth/user-not-found']) assert.equal(describeAuthError({ code }, { method: 'email' }).message, BAD);
+-  for (const code of ['auth/email-already-in-use', 'auth/weak-password', 'auth/invalid-email', 'auth/operation-not-allowed', 'auth/too-many-requests', 'auth/user-disabled', 'auth/network-request-failed']) { const m = describeAuthError({ code }, { method: 'email' }).message; assert.ok(m.length > 10 && /[\u0600-\u06FF]/.test(m) && !/auth\//.test(m), code); }
+-  assert.match(describeAuthError({ code: 'auth/operation-not-allowed' }, { method: 'email' }).message, /بالبريد الإلكتروني غير متاح/);
+-  assert.match(describeAuthError({ code: 'auth/operation-not-allowed' }).message, /Google/); // مسار Google بلا تغيير
+-});
+-
+-test('E26. أخطاء إعدادات المشروع (قيود مفتاح API على النطاق وغيرها) تُعرض كرسالة إعدادات واضحة لكل الطرق، لا كـ"خطأ غير متوقع"', async () => {
+-  const { CONFIG_ERROR } = await import('../js/auth-flow.js');
+-  for (const code of ['auth/requests-from-referer-https://matlabk.github.io-are-blocked.', 'auth/invalid-api-key', 'auth/app-not-authorized', 'auth/configuration-not-found']) for (const method of ['google', 'email']) assert.equal(describeAuthError({ code }, { method }).message, CONFIG_ERROR, code + ' ' + method);
+-  assert.notEqual(describeAuthError({ code: 'auth/internal-error' }).message, CONFIG_ERROR);
+-});
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/firestore.rules.hardening.test.mjs proj/tests/firestore.rules.hardening.test.mjs
+--- orig/tests/firestore.rules.hardening.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/firestore.rules.hardening.test.mjs	2026-10-13 23:21:36.468415560 +0000
+@@ -121,3 +121,66 @@
+   for (const [c, id] of [['users', 'custA'], ['users', 'admin'], ['stores', 'merA']]) await assertFails(getDoc(doc(anon(), c, id)));
+   await assertFails(getDoc(doc(as('custA'), 'users', 'drvA'))); await assertFails(getDoc(doc(as('custA'), 'users', 'admin'))); await assertSucceeds(getDoc(doc(as('custA'), 'users', 'custA')));
+ });
++
++// =====================================================================================================
++// HARDENING-2026b: التفاف على الاعتماد (تحديث status مباشر بلا حقول الاعتماد، بلا متجر، من حالات أخرى، عبر مسارات بديلة)
++// =====================================================================================================
++const runTx = (db, fn) => import('firebase/firestore').then((m) => m.runTransaction(db, fn));
++test('H12. لا اعتماد بتحديث status مباشر: pending لا يخرج إلا بالاعتماد/الرفض الكاملين (كابتن وتاجر)', async () => {
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), { status: 'active' }));
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), { status: 'active', updatedAt: serverTimestamp() }));
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'merP'), { status: 'active' }));
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), { status: 'rejected' }));
++  for (const st of ['blocked', 'paused', 'deleted', 'incomplete']) await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), { status: st })); // لا مسار pending -> تشغيل بديل
++  assert.equal((await dump('users/drvP')).status, 'pending'); assert.equal((await dump('users/merP')).status, 'pending');
++});
++test('H13. لا دخول لحالات التشغيل من incomplete/rejected بأي طريق (حتى باعتماد كامل أو بتحديث status مباشر أو عبر blocked/deleted)', async () => {
++  for (const id of ['drvI', 'drvR', 'merI', 'merR']) {
++    await assertFails(updateDoc(doc(as('admin'), 'users', id), { status: 'active' })); await assertFails(updateDoc(doc(as('admin'), 'users', id), approve('admin')));
++    for (const st of ['blocked', 'paused', 'deleted', 'pending']) await assertFails(updateDoc(doc(as('admin'), 'users', id), { status: st }));
++  }
++  await assertSucceeds(updateDoc(doc(as('admin'), 'users', 'drvA'), { status: 'blocked' })); await assertSucceeds(updateDoc(doc(as('admin'), 'users', 'drvA'), { status: 'deleted' })); await assertSucceeds(updateDoc(doc(as('admin'), 'users', 'drvA'), { status: 'active' })); // حركات التشغيل القديمة تعمل
++});
++test('H14. لا يُلمس حقول الاعتماد/الرفض مع حركات التشغيل، ولا لعميل/أدمن/كابتن مستقر', async () => {
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvA'), { status: 'paused', approvedBy: 'admin' }));
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvA'), { approvedBy: 'admin', approvedAt: serverTimestamp() })); // بلا تغيير حالة
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvA'), { rejectReason: 'x' }));
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'custA'), { approvedBy: 'admin' })); await assertFails(updateDoc(doc(as('admin'), 'users', 'admin2'), { rejectedBy: 'admin' }));
++  await assertSucceeds(updateDoc(doc(as('admin'), 'users', 'drvA'), { fullName: 'Edited', updatedAt: serverTimestamp() })); await assertSucceeds(updateDoc(doc(as('admin'), 'users', 'merA'), { storeName: 'Edited' })); // تعديل بيانات عادي
++});
++test('H15. المتجر: لا تفعيل/رفض للمتجر المعلّق وحده، ولا يتجاوز حالة حساب التاجر، ولا من rejected/incomplete', async () => {
++  await assertFails(updateDoc(doc(as('admin'), 'stores', 'merP'), { status: 'active' }));
++  await assertFails(updateDoc(doc(as('admin'), 'stores', 'merP'), { status: 'rejected' }));
++  await assertFails(updateDoc(doc(as('admin'), 'stores', 'merP'), { status: 'paused' }));
++  await assertFails(updateDoc(doc(as('admin'), 'stores', 'merR'), { status: 'active' })); await assertFails(updateDoc(doc(as('admin'), 'stores', 'merI'), { status: 'active' }));
++  const bad = writeBatch(as('admin')); bad.update(doc(as('admin'), 'stores', 'merP'), { status: 'active' }); bad.update(doc(as('admin'), 'users', 'merP'), { updatedAt: serverTimestamp() }); await assertFails(bad.commit()); // users لم تصبح active
++  await assertSucceeds(updateDoc(doc(as('admin'), 'stores', 'merP'), { storeName: 'Renamed' })); // تعديل بيانات بلا تغيير حالة
++  await assertSucceeds(updateDoc(doc(as('admin'), 'stores', 'merA'), { status: 'paused' })); await assertSucceeds(updateDoc(doc(as('admin'), 'stores', 'merA'), { status: 'active' }));
++  assert.equal((await dump('stores/merP')).status, 'pending');
++});
++test('H16. شروط الرفض: سبب غير فارغ ≤500، rejectedBy/At من الأدمن والخادم، ومتجر rejected للتاجر', async () => {
++  const rej = (extra = {}) => ({ status: 'rejected', rejectedBy: 'admin', rejectedAt: serverTimestamp(), rejectReason: 'سبب', rejectionReason: 'سبب', ...extra });
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), rej({ rejectReason: '' }))); await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), rej({ rejectReason: 'x'.repeat(501) })));
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), { status: 'rejected', rejectedBy: 'admin', rejectedAt: serverTimestamp() })); // بلا سبب
++  await assertFails(updateDoc(doc(as('admin'), 'users', 'drvP'), rej({ rejectReason: 5 })));
++  await assertSucceeds(updateDoc(doc(as('admin'), 'users', 'drvP'), rej()));
++  const b = writeBatch(as('admin')); b.update(doc(as('admin'), 'users', 'merP'), rej()); await assertFails(b.commit()); // بلا متجر
++  const b2 = writeBatch(as('admin')); b2.update(doc(as('admin'), 'users', 'merP'), rej()); b2.update(doc(as('admin'), 'stores', 'merP'), { status: 'rejected' }); await assertSucceeds(b2.commit());
++});
++test('H17. Transactions: اعتماد/رفض التاجر ينجح مع المتجر في نفس المعاملة، ويفشل بلا متجر أو بمتجر مختلف الحالة أو مفقود، بلا تحديث جزئي', async () => {
++  const ok = async (db) => runTx(db, async (tx) => { tx.update(doc(db, 'users', 'merP'), approve('admin')); tx.update(doc(db, 'stores', 'merP'), { status: 'active' }); });
++  await assertSucceeds(ok(as('admin'))); assert.equal((await dump('users/merP')).status, 'active'); assert.equal((await dump('stores/merP')).status, 'active');
++  await env.withSecurityRulesDisabled(async (c) => { await setDoc(doc(c.firestore(), 'users', 'merX'), { role: 'merchant', status: 'pending', storeName: 'X' }); }); // تاجر pending بلا مستند متجر
++  await assertFails(runTx(as('admin'), async (tx) => { tx.update(doc(as('admin'), 'users', 'merX'), approve('admin')); })); // بلا تحديث متجر
++  await assertFails(runTx(as('admin'), async (tx) => { tx.update(doc(as('admin'), 'users', 'merX'), approve('admin')); tx.update(doc(as('admin'), 'stores', 'merX'), { status: 'active' }); })); // المتجر غير موجود
++  await env.withSecurityRulesDisabled(async (c) => { await setDoc(doc(c.firestore(), 'users', 'merZ'), { role: 'merchant', status: 'pending' }); await setDoc(doc(c.firestore(), 'stores', 'merZ'), { status: 'rejected' }); });
++  await assertFails(runTx(as('admin'), async (tx) => { tx.update(doc(as('admin'), 'users', 'merZ'), approve('admin')); tx.update(doc(as('admin'), 'stores', 'merZ'), { status: 'active' }); })); // متجر rejected لا ينتقل إلى active
++  assert.equal((await dump('users/merZ')).status, 'pending'); assert.equal((await dump('stores/merZ')).status, 'rejected'); // لا تحديث جزئي
++});
++test('H18. إنشاء users بحقول غير معتمدة مرفوض (قائمة حقول)، والحمولة الفعلية للتطبيق تُقبل', async () => {
++  const base = { name: 'n', email: 'n@x.com', phone: '', role: 'customer', points: 0, photoURL: '', status: 'active', createdAt: serverTimestamp() };
++  await assertSucceeds(setDoc(doc(as('okU'), 'users', 'okU'), base));
++  for (const [k, v] of [['isAdmin', true], ['admin', true], ['requestId', 'D1'], ['approvalStatus', 'approved'], ['vehicleType', 'moto'], ['docs', { a: 1 }], ['role2', 'admin']]) await assertFails(setDoc(doc(as('u' + k), 'users', 'u' + k), { ...base, [k]: v }));
++  for (const role of ['merchant', 'driver']) await assertSucceeds(setDoc(doc(as('ok' + role), 'users', 'ok' + role), { ...base, role, status: 'incomplete' }));
++  await assertFails(setDoc(doc(as('badAdm'), 'users', 'badAdm'), { ...base, role: 'admin', status: 'incomplete', isAdmin: true }));
++});
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/google-only.test.mjs proj/tests/google-only.test.mjs
+--- orig/tests/google-only.test.mjs	1970-01-01 00:00:00.000000000 +0000
++++ proj/tests/google-only.test.mjs	2026-10-15 11:58:47.895466688 +0000
+@@ -0,0 +1,32 @@
++// node --test tests/google-only.test.mjs — Google هو مزوّد الدخول الوحيد: سلوك Google المتبقي من اختبارات البريد القديمة + غياب أي مسار آخر.
++// (اختبارات البريد/كلمة المرور/الاستعادة حُذفت عمدًا مع الميزة بقرار صاحب المشروع؛ سيناريوهاتها المشتركة مع Google مغطّاة في auth-e2e/auth-races/role-gate.)
++import { test, beforeEach } from 'node:test'; import assert from 'node:assert/strict';
++import { A, $, T, reset } from './helpers/env.mjs';
++import * as FLOW from '../js/auth-flow.js';
++import { describeAuthError, CONFIG_ERROR, OFFLINE_ERROR, roleIntentConflict } from '../js/auth-flow.js';
++beforeEach(() => reset());
++
++test('G1. لا مسار غير Google: auth.js و auth-flow.js لا يُصدّران أي دالة بريد/كلمة مرور/استعادة', () => {
++  for (const n of ['emailLogin', 'emailSignup', 'emailReset', 'openSignup', 'openForgot']) assert.equal(n in A, false, 'auth.js يصدّر ' + n);
++  for (const n of ['validateEmailLogin', 'validateSignup', 'isValidEmail', 'normalizeEmail', 'RESET_SENT', 'MIN_PASSWORD_LENGTH']) assert.equal(n in FLOW, false, 'auth-flow.js يصدّر ' + n);
++  assert.equal(typeof A.loginGoogle, 'function'); assert.equal(typeof A.loginGoogleRedirect, 'function'); assert.equal(typeof A.processAuthUser, 'function');
++});
++test('G2. Google بلا اتصال: رسالة عربية، لا نافذة، لا قفل عالق، ولا دور مختار متبقٍ', async () => {
++  const desc = Object.getOwnPropertyDescriptor(globalThis, 'navigator'); Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, configurable: true });
++  try { A.openLogin('customer'); await A.loginGoogle(); assert.equal($('err-msg').textContent, OFFLINE_ERROR); assert.equal(T().popupCalls, 0); assert.equal($('lg-google').disabled, false); assert.equal(A.peekEntryType(), null); }
++  finally { desc ? Object.defineProperty(globalThis, 'navigator', desc) : delete globalThis.navigator; }
++});
++test('G3. رسائل أخطاء Google: عربية وبلا رموز خام، وأخطاء إعدادات المشروع برسالة إعدادات، والمجهول برسالة عامة', () => {
++  for (const code of ['auth/popup-closed-by-user', 'auth/cancelled-popup-request', 'auth/popup-blocked', 'auth/network-request-failed', 'auth/unauthorized-domain', 'auth/operation-not-allowed', 'auth/user-disabled', 'auth/too-many-requests', 'auth/internal-error', 'auth/never-heard-of-it']) {
++    const d = describeAuthError({ code }); assert.ok(d.silent === true || (typeof d.message === 'string' && d.message.length > 5), code); assert.ok(!/auth\//.test(d.message || ''), code); // الصامتة (إلغاء مقصود) بلا رسالة
++  }
++  for (const code of ['auth/requests-from-referer-https://matlabk.github.io-are-blocked.', 'auth/invalid-api-key', 'auth/app-not-authorized', 'auth/configuration-not-found']) assert.equal(describeAuthError({ code }).message, CONFIG_ERROR, code);
++  assert.equal(describeAuthError({ code: 'auth/popup-blocked' }).offerRedirect, true); assert.equal(describeAuthError({ code: 'auth/popup-closed-by-user' }).silent, false);
++  assert.equal(describeAuthError({ code: 'auth/network-request-failed' }, { online: false }).message, OFFLINE_ERROR);
++});
++test('G4. رسالة تعارض الدور: النص المعتمد، بالدور الفعلي، وتطلب بريد Google آخر (لا "بريد إلكتروني آخر")', () => {
++  assert.equal(roleIntentConflict('driver', 'customer'), 'هذا البريد الإلكتروني مسجّل بالفعل كحساب عميل. لاستخدام MATLABK ككابتن، يُرجى تسجيل الدخول ببريد Google آخر.');
++  assert.equal(roleIntentConflict('merchant', 'driver'), 'هذا البريد الإلكتروني مسجّل بالفعل كحساب كابتن. لاستخدام MATLABK كتاجر، يُرجى تسجيل الدخول ببريد Google آخر.');
++  assert.ok(!/إلكتروني آخر/.test(roleIntentConflict('customer', 'merchant'))); assert.ok(!/admin|إدارة/i.test(roleIntentConflict('driver', 'admin'))); // لا كشف عن حساب الإدارة
++  assert.equal(roleIntentConflict('customer', 'customer'), null); assert.equal(roleIntentConflict('customer', 'admin'), null);
++});
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/helpers/env.mjs proj/tests/helpers/env.mjs
+--- orig/tests/helpers/env.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/helpers/env.mjs	2026-10-15 11:59:33.360463938 +0000
+@@ -21,7 +21,7 @@
+ export const $ = (id) => el(id);
+ export function reset() {
+   els.clear(); sessionStorage.clear(); localStorage.clear(); store.broken = false;
+-  globalThis.__t = { users: {}, stores: {}, reads: [], writes: [], calls: [], screens: [], signOuts: 0, popupCalls: 0, redirectCalls: 0, failRead: false, currentUser: null, popup: null, accounts: {}, emailCalls: [], netFail: false, resetErr: null, onAuth: null };
++  globalThis.__t = { users: {}, stores: {}, reads: [], writes: [], calls: [], screens: [], signOuts: 0, popupCalls: 0, redirectCalls: 0, failRead: false, currentUser: null, popup: null, netFail: false, onAuth: null };
+   globalThis.CU = null; globalThis.CUD = null; globalThis.selectedType = null;
+   if (typeof A !== 'undefined') { A.__resetAuthRuntimeForTests(); A.resetLoginState(); A.clearEntryIntent(); A.clearRedirectPending(); } // حالة الموديول (القفل/الاختيار) لا تتسرب بين الاختبارات
+   return globalThis.__t;
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/package.json proj/tests/package.json
+--- orig/tests/package.json	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/package.json	2026-10-15 22:25:27.042205224 +0000
+@@ -5,7 +5,7 @@
+   "scripts": {
+     "test": "firebase emulators:exec --config ../firebase.json --project go-elmanayef --only firestore \"node --test firestore.rules.test.mjs firestore.rules.hardening.test.mjs\"",
+     "contract": "node --test schema-contract.test.mjs",
+-    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs email-auth.test.mjs auth-e2e.test.mjs auth-reopen.test.mjs auth-races.test.mjs admin-authz.test.mjs rules-static.test.mjs handlers-wiring.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs",
++    "unit": "node --test account-state.test.mjs auth-contract.test.mjs auth-flow.test.mjs role-gate.test.mjs role-gate-pure.test.mjs google-only.test.mjs auth-e2e.test.mjs auth-reopen.test.mjs auth-races.test.mjs admin-authz.test.mjs admin-client-rules.test.mjs rules-static.test.mjs handlers-wiring.test.mjs schema-contract.test.mjs xss-escape.test.mjs normalize-pending.test.mjs functions-core.test.mjs",
+     "rules:local": "node --import ./rules-sim/register.mjs --test firestore.rules.test.mjs firestore.rules.hardening.test.mjs rules-sim.selftest.mjs",
+     "rules:mutation": "node --test rules-mutation.test.mjs",
+     "all": "npm run unit && npm run rules:local && npm run rules:mutation"
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/rules-mutation.test.mjs proj/tests/rules-mutation.test.mjs
+--- orig/tests/rules-mutation.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/rules-mutation.test.mjs	2026-10-14 10:53:33.301092148 +0000
+@@ -2,17 +2,24 @@
+ // الهدف إثبات أن الاختبارات (والمفسّر المحلي) حسّاسة فعلًا ولا تنجح دائمًا. يعمل على المفسّر المحلي فقط (ليس Emulator Google).
+ import { test } from 'node:test'; import assert from 'node:assert/strict'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { spawnSync } from 'node:child_process';
+ const rules = fs.readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8');
++const H = 'firestore.rules.hardening.test.mjs';
+ const MUT = [
+-  ['M1 الأدمن يغيّر role', "isAdmin() &&\n        request.resource.data.role == resource.data.role &&", 'isAdmin() &&', 'firestore.rules.hardening.test.mjs'],
+-  ['M2 تزوير approvedBy', "request.resource.data.approvedBy == request.auth.uid && request.resource.data.approvedAt == request.time", "request.resource.data.approvedAt == request.time", 'firestore.rules.hardening.test.mjs'],
+-  ['M3 approvedAt من العميل', "request.resource.data.approvedBy == request.auth.uid && request.resource.data.approvedAt == request.time", "request.resource.data.approvedBy == request.auth.uid", 'firestore.rules.hardening.test.mjs'],
+-  ['M4 اعتماد من غير pending', "resource.data.get('status', '') == 'pending' && request.resource.data.status == 'active'", "request.resource.data.status == 'active'", 'firestore.rules.hardening.test.mjs'],
+-  ['M5 متجر غير متسق عند اعتماد التاجر', "getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'active'", 'true', 'firestore.rules.hardening.test.mjs'],
+-  ['M6 أدمن موقوف يبقى أدمن', "        !(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('status', '') in ['blocked', 'deleted']);", "        true;", 'firestore.rules.hardening.test.mjs'],
+-  ['M7 قراءة المتاجر المعلّقة', "!(resource.data.get('status', '') in ['pending', 'rejected', 'incomplete']) || request.auth.uid == storeId || isAdmin());", "true);", 'firestore.rules.hardening.test.mjs'],
+-  ['M8 تزوير adminId في التدقيق', "        request.resource.data.adminId == request.auth.uid &&\n", "", 'firestore.rules.hardening.test.mjs'],
+-  ['M9 إنشاء حساب بنقاط/حالة تشغيل مُسبقة', "        request.resource.data.get('points', 0) == 0 &&\n        request.resource.data.get('isOnline', false) == false &&", "        request.resource.data.get('isOnline', false) == false &&", 'firestore.rules.hardening.test.mjs'],
+-  ['M10 إنشاء مستخدم بدور admin', "request.resource.data.role in ['customer', 'merchant', 'driver'] &&\n        (", "request.resource.data.role in ['customer', 'merchant', 'driver', 'admin'] &&\n        (", 'firestore.rules.hardening.test.mjs'],
++  ['M1 الأدمن يغيّر role', "isAdmin() &&\n        request.resource.data.role == resource.data.role &&", 'isAdmin() &&', H],
++  ['M2 تزوير approvedBy', "        request.resource.data.get('approvedBy', '') == request.auth.uid &&\n", "", H],
++  ['M3 approvedAt من العميل', "        request.resource.data.get('approvedAt', null) == request.time &&\n        (resource.data.role != 'merchant' ||\n          getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'active');", "        (resource.data.role != 'merchant' ||\n          getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'active');", H],
++  ['M4 اعتماد من غير pending', "      return resource.data.get('status', '') == 'pending' && request.resource.data.get('status', '') == 'active' &&\n        request.resource.data.get('approvedBy'", "      return request.resource.data.get('status', '') == 'active' &&\n        request.resource.data.get('approvedBy'", H],
++  ['M5 تاجر معتمد بمتجر غير متسق', "getAfter(/databases/$(database)/documents/stores/$(userId)).data.get('status', '') == 'active');\n    }\n    function adminRejectionOk", "true);\n    }\n    function adminRejectionOk", H],
++  ['M6 أدمن موقوف يبقى أدمن', "        !(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('status', '') in ['blocked', 'deleted']);", "        true;", H],
++  ['M7 قراءة المتاجر المعلّقة', "!(resource.data.get('status', '') in ['pending', 'rejected', 'incomplete']) || request.auth.uid == storeId || isAdmin());", "true);", H],
++  ['M8 تزوير adminId في التدقيق', "        request.resource.data.adminId == request.auth.uid &&\n", "", H],
++  ['M9 إنشاء حساب بنقاط/حالة تشغيل مسبقة', "        request.resource.data.get('points', 0) == 0 &&\n        request.resource.data.get('isOnline', false) == false &&", "        request.resource.data.get('isOnline', false) == false &&", H],
++  ['M10 إنشاء مستخدم بدور admin', "request.resource.data.role in ['customer', 'merchant', 'driver'] &&\n        (", "request.resource.data.role in ['customer', 'merchant', 'driver', 'admin'] &&\n        (", H],
++  ['M11 حقول الاعتماد تُلمس مع حركات التشغيل', "(opsStatus(resource.data.get('status', '')) && opsStatus(request.resource.data.get('status', '')) && !approvalTouched())", "(opsStatus(resource.data.get('status', '')) && opsStatus(request.resource.data.get('status', '')))", H],
++  ['M12 pending يدخل مجموعة التشغيل (التفاف blocked->active)', "(opsStatus(resource.data.get('status', '')) && opsStatus(request.resource.data.get('status', '')) && !approvalTouched())", "(opsStatus(request.resource.data.get('status', '')) && !approvalTouched())", H],
++  ['M13 تحديث status مباشر بلا اعتماد', "((request.resource.data.get('status', '') == resource.data.get('status', '') && !approvalTouched()) ||", "((true) ||", H],
++  ['M14 تفعيل المتجر وحده', "getAfter(/databases/$(database)/documents/users/$(storeId)).data.get('status', '') == 'active') ||", "true) ||", H],
++  ['M15 رفض بلا سبب', "        request.resource.data.get('rejectReason', '').size() > 0 && request.resource.data.get('rejectReason', '').size() <= 500 &&", "        request.resource.data.get('rejectReason', '').size() <= 500 &&", H],
++  ['M16 إنشاء مستخدم بحقول غير معتمدة', "        request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'role', 'points', 'photoURL', 'status', 'createdAt', 'updatedAt']) &&\n", "", H],
+ ];
+ const run = (file, text) => { const p = path.join(os.tmpdir(), 'mut-' + Math.random().toString(36).slice(2) + '.rules'); fs.writeFileSync(p, text); const r = spawnSync(process.execPath, ['--import', './rules-sim/register.mjs', '--test', file], { env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), RULES_PATH: p }, encoding: 'utf8' }); fs.unlinkSync(p); const m = /# fail (\d+)/.exec(r.stdout); return m ? Number(m[1]) : -1; };
+ test('MUT0. القواعد الأصلية (بدون طفرة) تنجح في الملفين', () => { for (const f of ['firestore.rules.test.mjs', 'firestore.rules.hardening.test.mjs']) assert.equal(run(f, rules), 0, f); });
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/rules-static.test.mjs proj/tests/rules-static.test.mjs
+--- orig/tests/rules-static.test.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/rules-static.test.mjs	2026-10-14 21:15:28.416353614 +0000
+@@ -18,7 +18,10 @@
+ });
+ test('S4. تحديث users لغير الأدمن: الدور ثابت وليس admin، وانتقال الحالة محكوم (incomplete/rejected -> pending فقط)', () => {
+   const u = block('users/{userId}'); const up = u.slice(u.indexOf('allow update'), u.indexOf('allow delete'));
+-  assert.match(up, /allow update: if adminUserUpdateOk\(userId\) \|\| \(/); assert.match(rules, /function adminUserUpdateOk\(userId\)[\s\S]*?request\.resource\.data\.role == resource\.data\.role[\s\S]*?approvedBy[\s\S]*?request\.auth\.uid[\s\S]*?request\.time[\s\S]*?rejectedBy/); assert.match(up, /request\.resource\.data\.role == resource\.data\.role/); assert.match(up, /request\.resource\.data\.role != 'admin'/);
++  assert.match(up, /allow update: if adminUserUpdateOk\(userId\) \|\| \(/); assert.match(rules, /function adminUserUpdateOk\(userId\)[\s\S]*?request\.resource\.data\.role == resource\.data\.role[\s\S]*?adminApprovalOk\(userId\)[\s\S]*?adminRejectionOk\(userId\)[\s\S]*?opsStatus[\s\S]*?approvalTouched\(\)/);
++  assert.match(rules, /function adminApprovalOk\(userId\)[\s\S]*?== 'pending'[\s\S]*?== 'active'[\s\S]*?approvedBy[\s\S]*?request\.auth\.uid[\s\S]*?approvedAt[\s\S]*?request\.time[\s\S]*?getAfter\(\/databases\/\$\(database\)\/documents\/stores/);
++  assert.match(rules, /function adminRejectionOk\(userId\)[\s\S]*?== 'pending'[\s\S]*?== 'rejected'[\s\S]*?rejectedBy[\s\S]*?rejectedAt[\s\S]*?request\.time[\s\S]*?rejectReason[\s\S]*?getAfter\(/);
++  assert.match(rules, /function adminStoreUpdateOk\(storeId\)[\s\S]*?getAfter\(\/databases\/\$\(database\)\/documents\/users\/\$\(storeId\)\)/);
+   assert.match(up, /request\.resource\.data\.status == 'pending' && resource\.data\.status in \['incomplete', 'rejected'\]/); assert.match(up, /driverSubmitComplete\(request\.resource\.data\)/); assert.match(up, /merchantSubmitComplete\(request\.auth\.uid\)/);
+   assert.match(u, /allow delete: if isAdmin\(\);/);
+ });
+diff -ruN -x node_modules -x '*.md' -x '*.patch' -x docs orig/tests/stubs/firebase.mjs proj/tests/stubs/firebase.mjs
+--- orig/tests/stubs/firebase.mjs	2026-10-13 04:27:06.000000000 +0000
++++ proj/tests/stubs/firebase.mjs	2026-10-15 11:59:33.359874780 +0000
+@@ -16,24 +16,3 @@
+ export const signInWithPopup = async () => { T().popupCalls++; return T().popup(); };
+ export const signInWithRedirect = async () => { T().redirectCalls++; };
+ export const signOut = async () => { T().currentUser = null; T().signOuts++; };
+-// ===== البريد وكلمة المرور (محاكاة تحكّمها الاختبارات عبر T().emailAuth) =====
+-// T().accounts: { 'a@x.com': { uid, password } } - المحاكاة تتبع سلوك Firebase: email-already-in-use / invalid-credential / weak-password / invalid-email
+-const fbErr = (code) => Object.assign(new Error(code), { code });
+-const fire = (u) => { T().currentUser = u; if (T().onAuth) queueMicrotask(() => T().onAuth(u)); return { user: u }; };
+-export const signInWithEmailAndPassword = async (_a, email, password) => {
+-  T().emailCalls.push({ op: 'signIn', email }); if (T().netFail) throw fbErr('auth/network-request-failed');
+-  const a = T().accounts[email]; if (!a || a.password !== password) throw fbErr('auth/invalid-credential');
+-  return fire({ uid: a.uid, email });
+-};
+-export const createUserWithEmailAndPassword = async (_a, email, password) => {
+-  T().emailCalls.push({ op: 'create', email }); if (T().netFail) throw fbErr('auth/network-request-failed');
+-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw fbErr('auth/invalid-email');
+-  if (password.length < 6) throw fbErr('auth/weak-password');
+-  if (T().accounts[email]) throw fbErr('auth/email-already-in-use');
+-  const a = { uid: 'uid-' + email, password }; T().accounts[email] = a; return fire({ uid: a.uid, email });
+-};
+-export const sendPasswordResetEmail = async (_a, email) => {
+-  T().emailCalls.push({ op: 'reset', email }); if (T().netFail) throw fbErr('auth/network-request-failed');
+-  if (T().resetErr) throw fbErr(T().resetErr);
+-  if (!T().accounts[email]) throw fbErr('auth/user-not-found');
+-};
