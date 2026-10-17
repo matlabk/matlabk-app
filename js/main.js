@@ -7,13 +7,13 @@ import { Logger, initOfflineHandling, callCurrentStore, callStore, closeModal, f
 import { markNotifRead, startNotifListener, registerNotificationsResets } from './notifications.js';
 import { initAdminMap, initTrackMap, closeLocationPicker, locPickerConfirm, locPickerUseCurrent, locPickerOnSearchInput, locPickerOnCategoryClick, locPickerOnResultClick, recenterTrackMap, recenterRideStatusMap, toggleDriverMap, showDriverMapTab, registerMapsResets } from './maps.js';
 import { goCheckout, openTrack, closeTrack, registerOrdersResets } from './orders.js';
-import { addCart, chgQty, custCancelOrderUI, custNav, doSearch, filterCat, loadBanners, loadCategories, loadCoupons, loadCustomerData, loadOrders, loadProducts, loadProductsByStore, loadStores, openAnyReq, openCart, openCustomerLocationPicker, openCustCompleteProfile, saveCustCompleteProfile, quickReq, removeCartItem, renderProds, selMCat, selectRatingTarget, sendAnyReq, setStar, submitMerchant, submitRating, updateCartUI, registerCustomerResets } from './customer.js';
+import { addCart, chgQty, custCancelOrderUI, custNav, doSearch, filterCat, loadBanners, loadCategories, loadCoupons, loadCustomerData, loadOrders, loadProducts, loadProductsByStore, loadStores, openAnyReq, openCart, openCustomerLocationPicker, openCustCompleteProfile, saveCustCompleteProfile, quickReq, removeCartItem, renderProds, selMCat, selectRatingTarget, sendAnyReq, setStar, submitMerchant, submitRating, updateCartUI, registerCustomerResets, openStore } from './customer.js';
 import { acceptOrd, agreeTermsModal, buildChart, closeTermsModal, closeZoom, dregBack, dregGetLocation, dregInit, dregNext, dregRestart, dregSaveDraft, dregSetExp, drvNav, getLocation, listenNewOrders, loadDriverData, loadDriverOrders, openTermsModal, removeUploadedDoc, startGPS, submitDrvReg, toggleAgree, toggleOnline, updOrdStatus, uploadDoc, zoomDoc, registerDriverResets, driverAvatarFallback } from './driver.js';
 import { delProd, loadMerchantData, loadMerchantOrders, loadMerchantProds, merchAcceptOrd, merchCancelOrdUI, merchRejectOrd, openAddProd, openMerchantLocationPicker, saveProd, uploadProductImage, removeProductImage, registerMerchantResets, merchNav, merchQuickToggleOpen, mstLoadProfile, mstSaveProfile, mstSetOpen, mstUploadLogo, loadMerchantAccount, merchToggleProdAvail } from './merchant.js';
 import { admAccDrv, admAccStore, admDelProd, admLogoutConfirm, admNav, admRejDrv, admRejStore, admUpdOrd, closeReasonModal, closeStoreManage, confirmReasonModal, delBanner, delCat, delCoupon, editBanner, editCat, editCoupon, filtDrvs, filtOrds, loadAdminData, loadAuditLog, loadMoreDrivers, loadMoreMerchants, loadMoreOrders, logAudit, openAddBanner, openAddCat, openAddCoupon, openDrvModal, openEditProd, openReasonModal, openStoreManage, renderAdminBanners, renderAdminCats, renderAdminCoupons, saveBanner, saveCat, saveComm, savePricingSettings, saveCoupon, saveEditProd, smDeleteCover, smDeleteStore, smQuickActivate, smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover, smUploadLogo, toggleProdAvail, uploadBannerImg, registerAdminResets, admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission } from './admin.js';
 import { onCustomerSearchInput, filterCustomersByStatus, loadMoreCustomers, openCustomerDetails, closeCustomerDetails, saveCustomerBasicInfo, toggleCustomerBlock, softDeleteCustomer, loadMoreCustomerOrders, registerCustomerListReset } from './admin-customers.js';
 import { loadMoreMerchantRequests, loadMoreAnyRequests, acceptMerchantRequest, rejectMerchantRequest, addNoteToMerchantRequest, acceptAnyRequest, rejectAnyRequest, addNoteToAnyRequest } from './admin-requests.js';
-import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, captureLoginIntent, isAuthOpActive, takeExpectedSignOut, emailLogin, emailSignup, emailReset, openSignup, openForgot, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
+import { completeRegistration, doLogout, firebaseAuthErrorMessage, hideLoading, loginGoogle, routeUser, selCMCat, submitMerchantProfile, syncToHubSpot, showLoginError, submitCustomerProfile, editMerchantProfile, processAuthUser, isAuthOpActive, takeExpectedSignOut, peekEntryType, clearEntryIntent, handleSignedIn, retryLoadAccount, openRolePick, openLogin, pickRole, loginGoogleRedirect, resetLoginState, hasRedirectPending, clearRedirectPending } from './auth.js';
 import { openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest, acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus, registerRidesResets } from './rides.js';
 import { sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer, handleDriverExternalAction, reportItemUnavailableFromPanel, reportBudgetExceededFromPanel, epCustomerCancel, epCustomerContinue, epCloseStatus, epOpenLocationPicker, epCancelAnyReq, registerExternalResets } from './external.js';
 import { renderIcons } from './icons.js';
@@ -43,6 +43,7 @@ registerExternalResets();
 // global تلقائيًا. index.html بينده الدوال دي من onclick="..." واللي بتدور عليها في
 // window بس. من غير الكتلة دي، أي زرار في التطبيق هيفشل بصمت.
 Object.assign(window, {
+  openStore,
   callCurrentStore, callStore, closeModal, filterProds, openNotifs, openWA, setLoad, showErr,
   showScreen, showToast, waCurrentStore, markNotifRead, startNotifListener, initAdminMap,
   initTrackMap, recenterTrackMap, recenterRideStatusMap, toggleDriverMap, showDriverMapTab, goCheckout, openTrack, closeTrack, addCart, chgQty, custNav, doSearch,
@@ -66,7 +67,7 @@ Object.assign(window, {
   smQuickPause, smQuickDelete, smSaveProfile, smSetAccountStatus, smSetOpen, smTab, smUploadCover,
   smUploadLogo, toggleProdAvail, uploadBannerImg, doLogout, loginGoogleRedirect, hideLoading,
   admDrvPause, admDrvActivate, admDrvDelete, saveRidePricingSettings, saveExternalPricingSettings, saveExternalCommission,
-  loginGoogle, emailLogin, emailSignup, emailReset, openSignup, openForgot, openRolePick, pickRole, openLogin, retryLoadAccount, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
+  loginGoogle, openRolePick, pickRole, openLogin, retryLoadAccount, routeUser, completeRegistration, submitMerchantProfile, submitCustomerProfile, editMerchantProfile, selCMCat,
   syncToHubSpot, openRideRequest, resetRideRequest, rrClose, rrOpenPointPicker, selectRideVehicle, createRideRequest,
   acceptRideOffer, rejectRideOffer, retryDispatch, handleDriverRideAction, rsCloseStatus,
   sendExternalPurchase, retryExternalDispatch, acceptExternalOffer, rejectExternalOffer,
@@ -111,18 +112,8 @@ try { if (hasRedirectPending()) { const s = document.getElementById('ld-sub'); i
 
 onAuthStateChanged(auth, async user => {
   if (user) {
-    const attempt = captureLoginIntent(); // الدور المختار + هل ده دخول جديد؟ (لازم قبل resetLoginState/clearRedirectPending)
-    resetLoginState(); clearRedirectPending(); // Firebase أكّد الجلسة فعليًا => نفك زر الدخول ونمسح علامة الـ redirect
-    // MATLABK: منع تسرّب حالة حساب لحساب تاني (تبديل حسابات Google): أي بيانات محلية مرتبطة بمستخدم سابق تتمسح.
-    try {
-      const last = localStorage.getItem('matlabk_last_uid');
-      if (last && last !== user.uid) { localStorage.removeItem('manayef_drv_draft'); window.uploadedDocs = {}; window.cart = []; }
-      localStorage.setItem('matlabk_last_uid', user.uid);
-    } catch(e) {}
-    window.CUD = null;
-    window.CU = user;
-    // بوابة الدور المشتركة (auth.js): قراءة users/{uid} + مقارنة الدور المختار بالفعلي + fail-closed، قبل أي لوحة.
-    try { await handleSignedIn(user, attempt); }
+    // كل منطق الدخول (تحديد المحاولة المالكة، الجلسات القديمة، بوابة الدور) في auth.js: processAuthUser
+    try { await processAuthUser(user); }
     catch(e) {
       console.error('Auth routing error:', e);
       window.CUD = null; hideLoading();

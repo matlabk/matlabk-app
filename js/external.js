@@ -251,7 +251,7 @@ export async function rejectExternalOffer() {
         t.update(ref, { rejectedDriverIds: newRejected, dispatchLog: log, updatedAt: serverTimestamp() });
       }
     });
-  } catch (e) {}
+  } catch (e) { console.warn('[external] driver reject offer failed:', e?.code || 'unknown'); }
   window.currentEpOfferId = null;
   const banner = document.getElementById('ep-offer-banner'); if (banner) banner.style.display = 'none';
 }

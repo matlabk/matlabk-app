@@ -1,6 +1,7 @@
 // ===== admin.js — لوحة الإدارة: الطلبات، المستخدمين، المتاجر، التصنيفات، البانرات، الكوبونات، سجل التدقيق =====
 
-import { addDoc, collection, writeBatch, db, deleteDoc, doc, getAggregateFromServer, getCountFromServer, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where, average, count } from './firebase.js';
+import { addDoc, collection, writeBatch, runTransaction, db, deleteDoc, doc, getAggregateFromServer, getCountFromServer, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where, average, count } from './firebase.js';
+import { isAdminProfile } from './account-state.js';
 import { SL, closeModal, esc, escJs, normalizeStatus, onListenersCleared, onSnapshot, orderStatusBadge, secureCloudinaryUpload, showToast } from './utils.js';
 import { doLogout } from './auth.js';
 import { icon } from './icons.js';
@@ -60,7 +61,7 @@ const ADMIN_NEXT_STATUS = {
 export let adminOrdersUnsub = null, adminUsersUnsub = null;
 export async function loadAdminData() {
   // MATLABK (defense in depth): لا نفتح أي listener إداري لو الدور المحمَّل من Firestore مش admin. الحماية الحقيقية: isAdmin() في firestore.rules.
-  if (window.CUD?.role !== 'admin') { console.warn('[admin] blocked: not an admin account'); return; }
+  if (!isAdminProfile(window.CUD)) { console.warn('[admin] blocked: not an admin account'); return; }
   if (adminOrdersUnsub) return;
   loadPricingSettingsUI();
   loadCommissionUI();
@@ -202,7 +203,7 @@ async function renderOneMerchantRow(m) {
     ]);
     prodC=pAgg.data().count; ordC=oAgg.data().count; ratingC=rAgg.data().count;
     if(ratingC) ratingAvg=(rAgg.data().avg||0).toFixed(1);
-  }catch(e){}
+  }catch(e){ console.warn('[admin] store stats (aggregate) failed:', e?.code || 'unknown'); }
   const createdStr = m.createdAt?.toDate ? m.createdAt.toDate().toLocaleDateString('ar-EG') : '--';
   const statusBadge = m.status==='pending'?`<span class="status status--pending">${icon('clock',11)} بانتظار</span>`
     : m.status==='active'?`<span class="status status--success">${icon('check-circle',11)} نشط</span>`
@@ -297,7 +298,7 @@ export async function logAudit(action, details){
   // في نفس الملف - بيستخدمهم زر "تفعيل/إيقاف" و"حفظ" في شاشة منتجات التاجر الجديدة P15). من
   // غير الفحص ده، كل نداء من حساب تاجر كان بيبعت كتابة مرفوضة بصمت (catch فاضي) - مفيش أي
   // تغيير في الـ rules نفسها، بس بنمنع محاولة كتابة إحنا عارفين مسبقًا إنها هترفض.
-  if (window.CUD?.role !== 'admin') return;
+  if (!isAdminProfile(window.CUD)) return;
   try{
     await addDoc(collection(db,'auditLog'),{
       adminId: window.CU?.uid||null,
@@ -305,7 +306,7 @@ export async function logAudit(action, details){
       action, details: details||'',
       createdAt: serverTimestamp()
     });
-  }catch(e){}
+  }catch(e){ console.warn('[admin] audit log write failed:', e?.code || 'unknown'); }
 }
 export let auditLogUnsub = null;
 export function loadAuditLog(){
@@ -367,20 +368,45 @@ export async function admUpdOrd(id,status){
 }
 
 // ===== MATLABK: عمليات الاعتماد/الرفض/الإيقاف ذرّية (Batch واحد) - لو أي كتابة فشلت، مفيش حاجة بتتغيّر. بدون catch صامت. =====
-async function adminDecision(uid, { withStore, userPatch, storeStatus, notif }) {
-  const b = writeBatch(db);
-  b.update(doc(db,'users',uid), { ...userPatch, updatedAt: serverTimestamp() });
-  if (withStore) b.update(doc(db,'stores',uid), { status: storeStatus, updatedAt: serverTimestamp() });
-  if (notif) b.set(doc(collection(db,'notifications')), { userId: uid, ...notif, read: false, createdAt: serverTimestamp() });
-  await b.commit();
+// قرار الإدارة على طلب كابتن/تاجر: يتحقق من الهدف داخل Transaction (قراءة ثم كتابة ذرّية) قبل أي تغيير:
+//  - المنفِّذ أدمن فعلًا (الدور المحمَّل من users/{uid}؛ الـRules تفرض isAdmin() مستقلًا عن الواجهة)،
+//  - الهدف موجود بالدور المتوقع (driver/merchant) وحالته pending الآن (لا اعتماد/رفض لحساب blocked/active/incomplete/rejected بسبب شاشة قديمة)،
+//  - للتاجر: مستند المتجر موجود وحالته pending. لو أي شرط فشل: لا يُكتب شيء.
+const AdminDecisionError = function (code) { const e = new Error(code); e.code = code; e.adminDecision = true; return e; }; // (دالة بدل class: فحص undef-check الساكن)
+const ADMIN_DECISION_MSG = {
+  'not-admin': 'هذا الإجراء متاح للإدارة فقط.',
+  'target-missing': 'الطلب غير موجود. حدّث الصفحة.',
+  'target-role-mismatch': 'هذا الحساب ليس من نوع الطلب المطلوب. حدّث الصفحة.',
+  'target-not-pending': 'تم تغيير حالة هذا الطلب بالفعل. حدّث الصفحة ثم راجع حالته.',
+  'store-missing': 'بيانات المتجر غير مكتملة. لا يمكن اتخاذ القرار.',
+  'store-not-pending': 'حالة المتجر لا تطابق الطلب. حدّث الصفحة ثم راجع حالته.',
+};
+const adminDecisionMessage = (e, fallback) => (e && e.adminDecision ? ADMIN_DECISION_MSG[e.code] : null) || fallback;
+async function adminDecision(uid, { expectRole, withStore, userPatch, storeStatus, notif }) {
+  if (!isAdminProfile(window.CUD) || !window.CU?.uid) throw AdminDecisionError('not-admin');
+  await runTransaction(db, async (tx) => {
+    const uRef = doc(db, 'users', uid); const u = await tx.get(uRef);
+    if (!u.exists()) throw AdminDecisionError('target-missing');
+    const d = u.data();
+    if (d.role !== expectRole) throw AdminDecisionError('target-role-mismatch');
+    if (d.status !== 'pending') throw AdminDecisionError('target-not-pending');
+    if (withStore) {
+      const sRef = doc(db, 'stores', uid); const st = await tx.get(sRef);
+      if (!st.exists()) throw AdminDecisionError('store-missing');
+      if (st.data().status !== 'pending') throw AdminDecisionError('store-not-pending');
+      tx.update(sRef, { status: storeStatus, updatedAt: serverTimestamp() });
+    }
+    tx.update(uRef, { ...userPatch, updatedAt: serverTimestamp() });
+    if (notif) tx.set(doc(collection(db, 'notifications')), { userId: uid, ...notif, read: false, createdAt: serverTimestamp() });
+  });
 }
 const approvedPatch = () => ({ status:'active', approvedAt:serverTimestamp(), approvedBy:window.CU.uid });
 const rejectedPatch = (reason) => ({ status:'rejected', rejectReason:reason, rejectionReason:reason, rejectedAt:serverTimestamp(), rejectedBy:window.CU.uid });
 export async function admAccDrv(uid){
   try{
-    await adminDecision(uid,{withStore:false,userPatch:approvedPatch(),notif:{title:'تم قبول حسابك',body:'تم اعتماد حسابك ككابتن توصيل، تقدر تبدأ تستقبل الطلبات الآن.',type:'or'}});
-    logAudit('قبول كابتن');showToast('تم قبول المندوب','ok');closeModal('drv-modal');
-  }catch(e){ console.error('admAccDrv failed', e); showToast('فشل الاعتماد - لم يتم أي تغيير','err'); }
+    await adminDecision(uid,{expectRole:'driver',withStore:false,userPatch:approvedPatch(),notif:{title:'تم قبول حسابك',body:'تم اعتماد حسابك ككابتن توصيل، تقدر تبدأ تستقبل الطلبات الآن.',type:'or'}});
+    logAudit('قبول كابتن', uid);showToast('تم قبول المندوب','ok');closeModal('drv-modal');
+  }catch(e){ console.error('admAccDrv failed', e?.code || e?.message); showToast(adminDecisionMessage(e,'فشل الاعتماد - لم يتم أي تغيير'),'err'); }
 }
 // P17 (A2 - Captain Lifecycle): إيقاف/تفعيل/حذف كابتن نشط بالفعل (بعد الموافقة) - كانت موجودة
 // لصفحة "المتاجر" فقط (smQuickPause/smQuickActivate/smDeleteStore)، وده نفس المبدأ بالحرف لكن
@@ -402,23 +428,23 @@ export async function admDrvDelete(uid){
 export function admRejDrv(uid){
   openReasonModal('سبب رفض الكابتن', ['صورة البطاقة غير واضحة','الرخصة منتهية','البيانات غير مطابقة'], async(reason)=>{
     try{
-      await adminDecision(uid,{withStore:false,userPatch:rejectedPatch(reason),notif:{title:'لم تتم الموافقة على حسابك',body:'للأسف لم يتم قبول طلبك ككابتن. السبب: '+reason,type:'gn'}});
-      logAudit('رفض كابتن', reason);showToast('تم رفض الكابتن','err');closeModal('drv-modal');
-    }catch(e){ console.error('admRejDrv failed', e); showToast('فشل الرفض - لم يتم أي تغيير','err'); }
+      await adminDecision(uid,{expectRole:'driver',withStore:false,userPatch:rejectedPatch(reason),notif:{title:'لم تتم الموافقة على حسابك',body:'للأسف لم يتم قبول طلبك ككابتن. السبب: '+reason,type:'gn'}});
+      logAudit('رفض كابتن', reason + ' (' + uid + ')');showToast('تم رفض الكابتن','err');closeModal('drv-modal');
+    }catch(e){ console.error('admRejDrv failed', e?.code || e?.message); showToast(adminDecisionMessage(e,'فشل الرفض - لم يتم أي تغيير'),'err'); }
   });
 }
 export async function admAccStore(id){
   try{
-    await adminDecision(id,{withStore:true,storeStatus:'active',userPatch:approvedPatch(),notif:{title:'تم قبول متجرك',body:'تم اعتماد متجرك على منصة MATLABK، تقدر تضيف منتجاتك وتستقبل الطلبات الآن.',type:'or'}});
-    logAudit('قبول متجر');showToast('تم قبول المتجر','ok');
-  }catch(e){ console.error('admAccStore failed', e); showToast('فشل الاعتماد - لم يتم أي تغيير','err'); }
+    await adminDecision(id,{expectRole:'merchant',withStore:true,storeStatus:'active',userPatch:approvedPatch(),notif:{title:'تم قبول متجرك',body:'تم اعتماد متجرك على منصة MATLABK، تقدر تضيف منتجاتك وتستقبل الطلبات الآن.',type:'or'}});
+    logAudit('قبول متجر', id);showToast('تم قبول المتجر','ok');
+  }catch(e){ console.error('admAccStore failed', e?.code || e?.message); showToast(adminDecisionMessage(e,'فشل الاعتماد - لم يتم أي تغيير'),'err'); }
 }
 export function admRejStore(id){
   openReasonModal('سبب رفض المتجر', ['المستندات غير واضحة','بيانات المتجر غير مكتملة','نشاط غير مسموح به'], async(reason)=>{
     try{
-      await adminDecision(id,{withStore:true,storeStatus:'rejected',userPatch:rejectedPatch(reason),notif:{title:'لم تتم الموافقة على متجرك',body:'للأسف لم يتم قبول طلب انضمام متجرك. السبب: '+reason,type:'gn'}});
-      logAudit('رفض متجر', reason);showToast('تم رفض المتجر','err');
-    }catch(e){ console.error('admRejStore failed', e); showToast('فشل الرفض - لم يتم أي تغيير','err'); }
+      await adminDecision(id,{expectRole:'merchant',withStore:true,storeStatus:'rejected',userPatch:rejectedPatch(reason),notif:{title:'لم تتم الموافقة على متجرك',body:'للأسف لم يتم قبول طلب انضمام متجرك. السبب: '+reason,type:'gn'}});
+      logAudit('رفض متجر', reason + ' (' + id + ')');showToast('تم رفض المتجر','err');
+    }catch(e){ console.error('admRejStore failed', e?.code || e?.message); showToast(adminDecisionMessage(e,'فشل الرفض - لم يتم أي تغيير'),'err'); }
   });
 }
 export async function openDrvModal(uid){
@@ -471,7 +497,7 @@ export async function renderAdminStoresList(allStores){
       ]);
       prodC=pSnap.size; ordC=oSnap.size; ratingC=rSnap.size;
       if(ratingC){let sum=0;rSnap.forEach(d=>sum+=d.data().stars||0);ratingAvg=(sum/ratingC).toFixed(1);}
-    }catch(e){}
+    }catch(e){ console.warn('[admin] store stats failed:', e?.code || 'unknown'); }
     const createdStr = m.createdAt?.toDate ? m.createdAt.toDate().toLocaleDateString('ar-EG') : '--';
     const statusBadge = m.status==='pending'?`<span class="status status--pending">${icon('clock',11)} بانتظار</span>`
       : m.status==='active'?`<span class="status status--success">${icon('check-circle',11)} نشط</span>`

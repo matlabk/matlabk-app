@@ -1,6 +1,6 @@
 // ===== customer.js — شاشات العميل: تصفح المتاجر/المنتجات، السلة، الطلبات، التقييم، طلبات عامة =====
 
-import { addDoc, collection, db, doc, getCountFromServer, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from './firebase.js';
+import { addDoc, collection, db, doc, getCountFromServer, getDoc, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from './firebase.js';
 import { SL, NEW_STEPS, NEW_STEP_ICONS, NEW_STEP_LABELS, callStore, closeModal, debounce, esc, escJs, filterProds, isValidPhone, normalizeStatus, onListenersCleared, onSnapshot, openWA, orderStatusBadge, showScreen, showToast } from './utils.js';
 import { ORDER_STATUS, custCancelOrder, openTrack } from './orders.js';
 import { icon } from './icons.js';
@@ -162,6 +162,17 @@ export function loadStores() {
   });
 }
 
+
+// بانر مرتبط بمتجر (b.storeId): كان onclick="openStore(...)" يشير لدالة غير معرّفة (الضغط لا يفعل شيئًا). يفتح نفس شاشة زر "اطلب".
+// نقرأ المتجر أولًا (القواعد تسمح بقراءة المتاجر active فقط لغير المالك) ونتجاهل غير المتاح بدل فتح شاشة فارغة.
+export async function openStore(storeId) {
+  try {
+    const snap = await getDoc(doc(db, 'stores', String(storeId || '')));
+    if (!snap.exists() || snap.data().status !== 'active') { showToast('هذا المتجر غير متاح حاليًا', 'err'); return; }
+    const m = snap.data();
+    showScreen('screen-store'); loadProductsByStore(snap.id, m.storeName || m.name || 'متجر', m.storePhone || m.phone || '');
+  } catch (e) { console.warn('[customer] openStore failed:', e?.code || 'unknown'); showToast('تعذّر فتح المتجر', 'err'); }
+}
 
 // ===== LOAD PRODUCTS BY STORE =====
 export let productsByStoreUnsub = null;

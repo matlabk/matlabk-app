@@ -27,10 +27,13 @@ export function isCustomerProfileComplete(u) {
 
 // returns: admin | blocked | customer-complete | customer-home | driver-register | driver-dashboard
 //          | merchant-complete | merchant-status | merchant-dashboard | unknown
+// نفس تعريف الدالة isAdmin في firestore.rules: role == admin وحالته ليست blocked/deleted (غياب status = مسموح، توافقًا مع حسابات الأدمن القائمة).
+export function isAdminProfile(u) { return !!u && u.role === 'admin' && u.status !== STATUS.BLOCKED && u.status !== STATUS.DELETED; }
+
 export function resolveRoute(u, ctx = {}) {
   if (!u) return 'unknown';
   const st = u.status;
-  if (u.role === 'admin') return 'admin';
+  if (u.role === 'admin') return isAdminProfile(u) ? 'admin' : 'blocked'; // أدمن موقوف/محذوف لا يدخل لوحة الإدارة (يطابق الدالة isAdmin في القواعد)
   if (u.role === 'driver') return st === STATUS.ACTIVE ? 'driver-dashboard' : 'driver-register';
   if (u.role === 'merchant') {
     if (st === STATUS.ACTIVE) return 'merchant-dashboard';
