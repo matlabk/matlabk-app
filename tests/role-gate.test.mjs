@@ -69,7 +69,7 @@ test('7. تسجيل الخروج: إنهاء الجلسة + الصفحة الر�
   assert.equal(t.currentUser, null); assert.equal(t.signOuts, 1); assert.equal(t.screens.at(-1), 'screen-entry');
   assert.equal(window.CUD, null); assert.equal(window.selectedType, null); assert.equal(sessionStorage.getItem('matlabk_entry_type'), null);
   assert.deepEqual(t.users[USER.uid], CUSTOMER); assert.equal(t.writes.length, 0);
-  assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false, method: 'google' });
+  assert.deepEqual(A.captureLoginIntent(), { action: 'handle', intent: null, fresh: false, method: 'google' });
 });
 
 // 8) الدور القديم لا يبقى عالقًا
@@ -83,7 +83,7 @@ test('8b. إلغاء نافذة Google: الدور المختار يُمسح (ل
   T().users[USER.uid] = CUSTOMER; A.openLogin('driver');
   T().popup = async () => { throw Object.assign(new Error('x'), { code: 'auth/popup-closed-by-user' }); };
   await A.loginGoogle();
-  assert.equal(sessionStorage.getItem('matlabk_entry_type'), null); assert.deepEqual(A.captureLoginIntent(), { intent: null, fresh: false, method: 'google' });
+  assert.equal(sessionStorage.getItem('matlabk_entry_type'), null); assert.deepEqual(A.captureLoginIntent(), { action: 'handle', intent: null, fresh: false, method: 'google' });
   assert.match(errText(), /تم إغلاق نافذة Google/); assert.equal($('lg-google').disabled, false);
 });
 test('8c. دور مختار منتهي الصلاحية (>10 دقائق) في تخزين الجلسة يُتجاهل', () => {
@@ -184,10 +184,11 @@ test('12i. ضغط متكرر على Google أثناء عملية معلّقة =>
   done({ user: USER }); t.currentUser = USER; await p1;
 });
 
-test('13. مستمع main.js يطابق تسلسل الاختبار: التقاط الدور -> reset -> بوابة واحدة (لا توجيه مباشر)', async () => {
-  const { readFileSync } = await import('node:fs'); const m = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
-  const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>'));
-  const i1 = h.indexOf('captureLoginIntent()'), i2 = h.indexOf('resetLoginState(); clearRedirectPending();'), i3 = h.indexOf('window.CU = user;'), i4 = h.indexOf('await handleSignedIn(user, attempt)');
+test('13. مستمع main.js يمرّ على processAuthUser فقط، وهذه تلتقط المحاولة -> reset -> بوابة واحدة (لا توجيه مباشر)', async () => {
+  const { readFileSync } = await import('node:fs'); const m = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8'); const a = readFileSync(new URL('../js/auth.js', import.meta.url), 'utf8');
+  const h = m.slice(m.indexOf('onAuthStateChanged(auth, async user =>')); assert.match(h, /await processAuthUser\(user\)/); assert.doesNotMatch(h, /handleSignedIn|routeUser\(\)|getDoc\(/);
+  const pu = a.slice(a.indexOf('export async function processAuthUser('), a.indexOf('async function discardStaleSession'));
+  const i1 = pu.indexOf('captureLoginIntent(user)'), i2 = pu.indexOf('resetLoginState()'), i3 = pu.indexOf('window.CU = user;'), i4 = pu.indexOf('await handleSignedIn(user, attempt)');
   assert.ok(i1 > 0 && i1 < i2 && i2 < i3 && i3 < i4);
 });
 test('14. بعد رفض الدور لا يعاد تمرير نفس الدخول على البوابة (سباق popup/المستمع) ولا تبقى جلسة CU', async () => {

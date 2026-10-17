@@ -1,13 +1,14 @@
 // يحتاج Emulator + شبكة:  cd tests && npm i && npm test        (لم يُشغَّل في بيئة التدقيق — الشبكة كانت معطّلة)
 import { test, before, beforeEach, after } from 'node:test';
 import fs from 'node:fs';
+import assert from 'node:assert/strict';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp, setLogLevel } from 'firebase/firestore';
 setLogLevel('error');
 let env;
 const P = (o) => ({ ...o });
 before(async () => {
-  env = await initializeTestEnvironment({ projectId: 'go-elmanayef', firestore: { rules: fs.readFileSync('../firestore.rules', 'utf8') } });
+  env = await initializeTestEnvironment({ projectId: 'go-elmanayef', firestore: { rules: fs.readFileSync(process.env.RULES_PATH || '../firestore.rules', 'utf8') } });
 });
 after(() => env.cleanup());
 beforeEach(async () => {
@@ -223,7 +224,8 @@ test('ROLE ESCALATION matrix: every self role change fails', async () => {
 test('self-approval matrix + forged approval metadata', async () => {
   await seedStates();
   for (const uid of ['drv_pending', 'mer_pending', 'custA']) {
-    await assertFails(updateDoc(doc(as(uid), 'users', uid), { status: 'active' }));
+    // custA أصلًا active: كتابة status:'active' بنفس القيمة ليست تغييرًا (لا تصعيد)، فنختبر محاولة تغيير فعلية للعميل (تصحيح توقع اختبار لم يكن قد شُغّل)
+    await assertFails(updateDoc(doc(as(uid), 'users', uid), { status: uid === 'custA' ? 'pending' : 'active' }));
     for (const f of [{ approvedBy: uid }, { approvedAt: serverTimestamp() }, { rejectedBy: 'x' }, { rejectReason: 'x' }, { approvalStatus: 'approved' }]) await assertFails(updateDoc(doc(as(uid), 'users', uid), f));
   }
 });
@@ -244,7 +246,9 @@ test('merchant approval ATOMIC: admin batch users+stores commits both; partial b
   b.update(doc(as('admin'), 'stores', 'mer_pending'), { status: 'active' }); await assertSucceeds(b.commit());
   await env.withSecurityRulesDisabled(async (c) => { const [u, st] = await Promise.all([getDoc(doc(c.firestore(), 'users', 'mer_pending')), getDoc(doc(c.firestore(), 'stores', 'mer_pending'))]); if (u.data().status !== 'active' || st.data().status !== 'active') throw new Error('not atomic'); });
   const b2 = writeBatch(as('admin')); b2.update(doc(as('admin'), 'users', 'mer_incomplete'), { status: 'active', approvedBy: 'admin' });
-  b2.update(doc(as('admin'), 'stores', 'does_not_exist'), { status: 'active' }); await assertFails(b2.commit());
+  b2.update(doc(as('admin'), 'stores', 'does_not_exist'), { status: 'active' });
+  // الخادم يفشل not-found (القواعد تسمح للأدمن بالتحديث) وليس permission-denied؛ المقصود هنا الذرّية: الدفعة تفشل كاملة ولا شيء يتسرّب
+  await assert.rejects(b2.commit());
   await env.withSecurityRulesDisabled(async (c) => { const u = await getDoc(doc(c.firestore(), 'users', 'mer_incomplete')); if (u.data().status !== 'incomplete') throw new Error('partial write leaked'); });
 });
 test('rejected merchant resubmits: users->pending and stores rejected->pending in one batch', async () => {
